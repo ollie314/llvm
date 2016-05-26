@@ -59,10 +59,12 @@ LoadCommands:
     cmdsize:         48
     rebase_off:      12288
     rebase_size:     8
-    bind_off:        96
+    bind_off:        12296
+    bind_size:       96
     weak_bind_off:   0
     weak_bind_size:  0
-    lazy_bind_off:   624
+    lazy_bind_off:   12392
+    lazy_bind_size:  624
     export_off:      13016
     export_size:     48
   - cmd:             LC_SYMTAB
@@ -95,7 +97,6 @@ LoadCommands:
     cmdsize:         32
     name:            12
   - cmd:             LC_UUID
-    cmdsize:         24
     cmdsize:         24
     uuid:            461A1B28-822F-3F38-B670-645419E636F5
   - cmd:             LC_VERSION_MIN_MACOSX
@@ -184,10 +185,12 @@ LoadCommands:
 #CHECK:     cmdsize:         48
 #CHECK:     rebase_off:      12288
 #CHECK:     rebase_size:     8
-#CHECK:     bind_off:        96
+#CHECK:     bind_off:        12296
+#CHECK:     bind_size:       96
 #CHECK:     weak_bind_off:   0
 #CHECK:     weak_bind_size:  0
-#CHECK:     lazy_bind_off:   624
+#CHECK:     lazy_bind_off:   12392
+#CHECK:     lazy_bind_size:  624
 #CHECK:     export_off:      13016
 #CHECK:     export_size:     48
 #CHECK:   - cmd:             LC_SYMTAB
@@ -220,7 +223,6 @@ LoadCommands:
 #CHECK:     cmdsize:         32
 #CHECK:     name:            12
 #CHECK:   - cmd:             LC_UUID
-#CHECK:     cmdsize:         24
 #CHECK:     cmdsize:         24
 #CHECK:     uuid:            461A1B28-822F-3F38-B670-645419E636F5
 #CHECK:   - cmd:             LC_VERSION_MIN_MACOSX

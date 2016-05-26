@@ -13,6 +13,7 @@
 #include "llvm/DebugInfo/PDB/Raw/InfoStream.h"
 #include "llvm/DebugInfo/PDB/Raw/PublicsStream.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
+#include "llvm/DebugInfo/PDB/Raw/SymbolStream.h"
 #include "llvm/DebugInfo/PDB/Raw/TpiStream.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -123,6 +124,7 @@ StringRef PDBFile::getBlockData(uint32_t BlockIndex, uint32_t NumBytes) const {
 Error PDBFile::parseFileHeaders() {
   std::error_code EC;
   MemoryBufferRef BufferRef = *Context->Buffer;
+
   // Make sure the file is sufficiently large to hold a super block.
   // Do this before attempting to read the super block.
   if (BufferRef.getBufferSize() < sizeof(SuperBlock))
@@ -287,11 +289,20 @@ Expected<DbiStream &> PDBFile::getPDBDbiStream() {
 
 Expected<TpiStream &> PDBFile::getPDBTpiStream() {
   if (!Tpi) {
-    Tpi.reset(new TpiStream(*this));
+    Tpi.reset(new TpiStream(*this, StreamTPI));
     if (auto EC = Tpi->reload())
       return std::move(EC);
   }
   return *Tpi;
+}
+
+Expected<TpiStream &> PDBFile::getPDBIpiStream() {
+  if (!Ipi) {
+    Ipi.reset(new TpiStream(*this, StreamIPI));
+    if (auto EC = Ipi->reload())
+      return std::move(EC);
+  }
+  return *Ipi;
 }
 
 Expected<PublicsStream &> PDBFile::getPDBPublicsStream() {
@@ -306,4 +317,18 @@ Expected<PublicsStream &> PDBFile::getPDBPublicsStream() {
       return std::move(EC);
   }
   return *Publics;
+}
+
+Expected<SymbolStream &> PDBFile::getPDBSymbolStream() {
+  if (!Symbols) {
+    auto DbiS = getPDBDbiStream();
+    if (auto EC = DbiS.takeError())
+      return std::move(EC);
+    uint32_t SymbolStreamNum = DbiS->getSymRecordStreamIndex();
+
+    Symbols.reset(new SymbolStream(*this, SymbolStreamNum));
+    if (auto EC = Symbols->reload())
+      return std::move(EC);
+  }
+  return *Symbols;
 }

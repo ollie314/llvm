@@ -25,6 +25,7 @@ struct PDBFileContext;
 class DbiStream;
 class InfoStream;
 class PublicsStream;
+class SymbolStream;
 class TpiStream;
 
 class PDBFile {
@@ -63,14 +64,18 @@ public:
   Expected<InfoStream &> getPDBInfoStream();
   Expected<DbiStream &> getPDBDbiStream();
   Expected<TpiStream &> getPDBTpiStream();
+  Expected<TpiStream &> getPDBIpiStream();
   Expected<PublicsStream &> getPDBPublicsStream();
+  Expected<SymbolStream &> getPDBSymbolStream();
 
 private:
   std::unique_ptr<PDBFileContext> Context;
   std::unique_ptr<InfoStream> Info;
   std::unique_ptr<DbiStream> Dbi;
   std::unique_ptr<TpiStream> Tpi;
+  std::unique_ptr<TpiStream> Ipi;
   std::unique_ptr<PublicsStream> Publics;
+  std::unique_ptr<SymbolStream> Symbols;
 };
 }
 }

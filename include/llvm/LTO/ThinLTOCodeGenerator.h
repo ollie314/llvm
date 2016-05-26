@@ -37,7 +37,7 @@ struct TargetMachineBuilder {
   std::string MCpu;
   std::string MAttr;
   TargetOptions Options;
-  Reloc::Model RelocModel = Reloc::Default;
+  Optional<Reloc::Model> RelocModel;
   CodeGenOpt::Level CGOptLevel = CodeGenOpt::Default;
 
   std::unique_ptr<TargetMachine> create() const;
@@ -168,7 +168,9 @@ public:
   }
 
   /// CodeModel
-  void setCodePICModel(Reloc::Model Model) { TMBuilder.RelocModel = Model; }
+  void setCodePICModel(Optional<Reloc::Model> Model) {
+    TMBuilder.RelocModel = Model;
+  }
 
   /// CodeGen optimization level
   void setCodeGenOptLevel(CodeGenOpt::Level CGOptLevel) {
@@ -196,7 +198,9 @@ public:
   std::unique_ptr<ModuleSummaryIndex> linkCombinedIndex();
 
   /**
-   * Perform promotion and renaming of exported internal functions.
+   * Perform promotion and renaming of exported internal functions,
+   * and additionally resolve weak and linkonce symbols.
+   * Index is updated to reflect linkage changes from weak resolution.
    */
   void promote(Module &Module, ModuleSummaryIndex &Index);
 
@@ -220,7 +224,7 @@ public:
       std::map<std::string, GVSummaryMapTy> &ModuleToSummariesForIndex);
 
   /**
-   * Perform internalization.
+   * Perform internalization. Index is updated to reflect linkage changes.
    */
   void internalize(Module &Module, ModuleSummaryIndex &Index);
 

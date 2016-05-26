@@ -18,6 +18,7 @@ set(Tests
   CallerCalleeTest
   CounterTest
   CustomMutatorTest
+  EmptyTest
   FourIndependentBranchesTest
   FullCoverageSetTest
   InitializeTest
@@ -25,6 +26,7 @@ set(Tests
   LeakTest
   LeakTimeoutTest
   NullDerefTest
+  NullDerefOnEmptyTest
   NthRunCrashTest
   OutOfMemoryTest
   RepeatedMemcmp

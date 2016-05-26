@@ -10,11 +10,11 @@
 #include "llvm/DebugInfo/PDB/Raw/TpiStream.h"
 
 #include "llvm/DebugInfo/CodeView/CodeView.h"
+#include "llvm/DebugInfo/CodeView/StreamReader.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
 #include "llvm/DebugInfo/PDB/Raw/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
-#include "llvm/DebugInfo/PDB/Raw/StreamReader.h"
 
 #include "llvm/Support/Endian.h"
 
@@ -56,13 +56,13 @@ struct TpiStream::HeaderInfo {
   EmbeddedBuf HashAdjBuffer;
 };
 
-TpiStream::TpiStream(PDBFile &File)
-    : Pdb(File), Stream(StreamTPI, File), HashFunction(nullptr) {}
+TpiStream::TpiStream(PDBFile &File, uint32_t StreamIdx)
+    : Pdb(File), Stream(StreamIdx, File), HashFunction(nullptr) {}
 
 TpiStream::~TpiStream() {}
 
 Error TpiStream::reload() {
-  StreamReader Reader(Stream);
+  codeview::StreamReader Reader(Stream);
 
   if (Reader.bytesRemaining() < sizeof(HeaderInfo))
     return make_error<RawError>(raw_error_code::corrupt_file,
@@ -98,7 +98,7 @@ Error TpiStream::reload() {
 
   // Hash indices, hash values, etc come from the hash stream.
   MappedBlockStream HS(Header->HashStreamIndex, Pdb);
-  StreamReader HSR(HS);
+  codeview::StreamReader HSR(HS);
   HSR.setOffset(Header->HashValueBuffer.Off);
   if (auto EC =
           HashValuesBuffer.initialize(HSR, Header->HashValueBuffer.Length))
@@ -127,6 +127,14 @@ uint32_t TpiStream::TypeIndexEnd() const { return Header->TypeIndexEnd; }
 
 uint32_t TpiStream::NumTypeRecords() const {
   return TypeIndexEnd() - TypeIndexBegin();
+}
+
+uint16_t TpiStream::getTypeHashStreamIndex() const {
+  return Header->HashStreamIndex;
+}
+
+uint16_t TpiStream::getTypeHashStreamAuxIndex() const {
+  return Header->HashAuxStreamIndex;
 }
 
 iterator_range<codeview::TypeIterator> TpiStream::types(bool *HadError) const {

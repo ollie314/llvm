@@ -9,13 +9,13 @@
 
 #include "llvm/DebugInfo/PDB/Raw/DbiStream.h"
 
+#include "llvm/DebugInfo/CodeView/StreamReader.h"
 #include "llvm/DebugInfo/PDB/Raw/InfoStream.h"
 #include "llvm/DebugInfo/PDB/Raw/ModInfo.h"
 #include "llvm/DebugInfo/PDB/Raw/NameHashTable.h"
 #include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
-#include "llvm/DebugInfo/PDB/Raw/StreamReader.h"
 
 using namespace llvm;
 using namespace llvm::pdb;
@@ -53,11 +53,11 @@ struct DbiStream::HeaderInfo {
   little32_t VersionSignature;
   ulittle32_t VersionHeader;
   ulittle32_t Age;                     // Should match InfoStream.
-  ulittle16_t GSSyms;                  // Number of global symbols
+  ulittle16_t GlobalSymbolStreamIndex; // Global symbol stream #
   ulittle16_t BuildNumber;             // See DbiBuildNo structure.
-  ulittle16_t PublicSymbolStreamIndex; // Number of public symbols
+  ulittle16_t PublicSymbolStreamIndex; // Public symbols stream #
   ulittle16_t PdbDllVersion;           // version of mspdbNNN.dll
-  ulittle16_t SymRecords;              // Number of symbols
+  ulittle16_t SymRecordStreamIndex;    // Symbol records stream #
   ulittle16_t PdbDllRbld;              // rbld number of mspdbNNN.dll
   little32_t ModiSubstreamSize;        // Size of module info stream
   little32_t SecContrSubstreamSize;    // Size of sec. contribution stream
@@ -80,7 +80,7 @@ DbiStream::DbiStream(PDBFile &File) : Pdb(File), Stream(StreamDBI, File) {
 DbiStream::~DbiStream() {}
 
 Error DbiStream::reload() {
-  StreamReader Reader(Stream);
+  codeview::StreamReader Reader(Stream);
 
   Header.reset(new HeaderInfo());
 
@@ -170,7 +170,7 @@ Error DbiStream::reload() {
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Found unexpected bytes in DBI Stream.");
 
-  StreamReader ECReader(ECSubstream);
+  codeview::StreamReader ECReader(ECSubstream);
   if (auto EC = ECNames.load(ECReader))
     return EC;
 
@@ -186,6 +186,10 @@ uint32_t DbiStream::getAge() const { return Header->Age; }
 
 uint16_t DbiStream::getPublicSymbolStreamIndex() const {
   return Header->PublicSymbolStreamIndex;
+}
+
+uint16_t DbiStream::getGlobalSymbolStreamIndex() const {
+  return Header->GlobalSymbolStreamIndex;
 }
 
 bool DbiStream::isIncrementallyLinked() const {
@@ -210,7 +214,9 @@ uint16_t DbiStream::getBuildMinorVersion() const {
 
 uint32_t DbiStream::getPdbDllVersion() const { return Header->PdbDllVersion; }
 
-uint32_t DbiStream::getNumberOfSymbols() const { return Header->SymRecords; }
+uint32_t DbiStream::getSymRecordStreamIndex() const {
+  return Header->SymRecordStreamIndex;
+}
 
 PDB_Machine DbiStream::getMachineType() const {
   uint16_t Machine = Header->MachineType;
@@ -295,4 +301,16 @@ Error DbiStream::initializeFileInfo() {
   }
 
   return Error::success();
+}
+
+uint32_t DbiStream::getDebugStreamIndex(DbgHeaderType Type) const {
+  ArrayRef<uint8_t> DbgData;
+  if (auto EC = DbgHeader.getArrayRef(0, DbgData, DbgHeader.getLength())) {
+    consumeError(std::move(EC));
+    return uint32_t(-1);
+  }
+  ArrayRef<ulittle16_t> DebugStreams(
+      reinterpret_cast<const ulittle16_t *>(DbgData.data()),
+      DbgData.size() / sizeof(ulittle16_t));
+  return DebugStreams[static_cast<uint16_t>(Type)];
 }

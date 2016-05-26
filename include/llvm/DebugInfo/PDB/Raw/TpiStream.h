@@ -10,9 +10,9 @@
 #ifndef LLVM_DEBUGINFO_PDB_RAW_PDBTPISTREAM_H
 #define LLVM_DEBUGINFO_PDB_RAW_PDBTPISTREAM_H
 
+#include "llvm/DebugInfo/CodeView/ByteStream.h"
 #include "llvm/DebugInfo/CodeView/TypeStream.h"
 #include "llvm/DebugInfo/PDB/PDBTypes.h"
-#include "llvm/DebugInfo/PDB/Raw/ByteStream.h"
 #include "llvm/DebugInfo/PDB/Raw/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
 
@@ -28,7 +28,7 @@ class TpiStream {
   struct HeaderInfo;
 
 public:
-  TpiStream(PDBFile &File);
+  TpiStream(PDBFile &File, uint32_t StreamIdx);
   ~TpiStream();
   Error reload();
 
@@ -37,6 +37,8 @@ public:
   uint32_t TypeIndexBegin() const;
   uint32_t TypeIndexEnd() const;
   uint32_t NumTypeRecords() const;
+  uint16_t getTypeHashStreamIndex() const;
+  uint16_t getTypeHashStreamAuxIndex() const;
 
   iterator_range<codeview::TypeIterator> types(bool *HadError) const;
 
@@ -45,10 +47,10 @@ private:
   MappedBlockStream Stream;
   HashFunctionType HashFunction;
 
-  ByteStream RecordsBuffer;
-  ByteStream TypeIndexOffsetBuffer;
-  ByteStream HashValuesBuffer;
-  ByteStream HashAdjBuffer;
+  codeview::ByteStream RecordsBuffer;
+  codeview::ByteStream TypeIndexOffsetBuffer;
+  codeview::ByteStream HashValuesBuffer;
+  codeview::ByteStream HashAdjBuffer;
 
   std::unique_ptr<HeaderInfo> Header;
 };

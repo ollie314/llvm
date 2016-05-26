@@ -25,11 +25,13 @@
 #include "llvm/DebugInfo/PDB/Raw/PublicsStream.h"
 
 #include "llvm/DebugInfo/CodeView/CodeView.h"
+#include "llvm/DebugInfo/CodeView/StreamReader.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
 #include "llvm/DebugInfo/PDB/Raw/MappedBlockStream.h"
+#include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
-#include "llvm/DebugInfo/PDB/Raw/StreamReader.h"
+#include "llvm/DebugInfo/PDB/Raw/SymbolStream.h"
 
 #include "llvm/ADT/BitVector.h"
 #include "llvm/Support/Endian.h"
@@ -56,11 +58,10 @@ struct PublicsStream::HeaderInfo {
   ulittle32_t NumSections;
 };
 
-
-// This is GSIHashHdr struct defined in
+// This is GSIHashHdr.
 struct PublicsStream::GSIHashHeader {
-  enum {
-    HdrSignature = -1,
+  enum : unsigned {
+    HdrSignature = ~0U,
     HdrVersion = 0xeffe0000 + 19990810,
   };
   ulittle32_t VerSignature;
@@ -69,8 +70,9 @@ struct PublicsStream::GSIHashHeader {
   ulittle32_t NumBuckets;
 };
 
-struct PublicsStream::HRFile {
-  ulittle32_t Off;
+// This is HRFile.
+struct PublicsStream::HashRecord {
+  ulittle32_t Off; // Offset in the symbol record stream
   ulittle32_t CRef;
 };
 
@@ -84,7 +86,7 @@ struct SectionOffset {
 }
 
 PublicsStream::PublicsStream(PDBFile &File, uint32_t StreamNum)
-    : StreamNum(StreamNum), Stream(StreamNum, File) {}
+    : Pdb(File), StreamNum(StreamNum), Stream(StreamNum, File) {}
 
 PublicsStream::~PublicsStream() {}
 
@@ -97,7 +99,7 @@ uint32_t PublicsStream::getAddrMap() const { return Header->AddrMap; }
 // we skip over the hash table which we believe contains information about
 // public symbols.
 Error PublicsStream::reload() {
-  StreamReader Reader(Stream);
+  codeview::StreamReader Reader(Stream);
 
   // Check stream size.
   if (Reader.bytesRemaining() < sizeof(HeaderInfo) + sizeof(GSIHashHeader))
@@ -114,12 +116,12 @@ Error PublicsStream::reload() {
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Publics Stream does not contain a header.");
 
-  // An array of HRFile follows. Read them.
-  if (HashHdr->HrSize % sizeof(HRFile))
+  // An array of HashRecord follows. Read them.
+  if (HashHdr->HrSize % sizeof(HashRecord))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Invalid HR array size.");
-  std::vector<HRFile> HRs(HashHdr->HrSize / sizeof(HRFile));
-  if (auto EC = Reader.readArray<HRFile>(HRs))
+  HashRecords.resize(HashHdr->HrSize / sizeof(HashRecord));
+  if (auto EC = Reader.readArray<HashRecord>(HashRecords))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Could not read an HR array");
 
@@ -138,31 +140,54 @@ Error PublicsStream::reload() {
   // corrupted streams.
 
   // Hash buckets follow.
-  HashBuckets.resize(NumBuckets);
-  if (auto EC = Reader.readArray<uint32_t>(HashBuckets))
+  std::vector<ulittle32_t> TempHashBuckets(NumBuckets);
+  if (auto EC = Reader.readArray<ulittle32_t>(TempHashBuckets))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Hash buckets corrupted.");
+  HashBuckets.resize(NumBuckets);
+  std::copy(TempHashBuckets.begin(), TempHashBuckets.end(),
+            HashBuckets.begin());
 
   // Something called "address map" follows.
-  AddressMap.resize(Header->AddrMap / sizeof(uint32_t));
-  if (auto EC = Reader.readArray<uint32_t>(AddressMap))
+  std::vector<ulittle32_t> TempAddressMap(Header->AddrMap / sizeof(uint32_t));
+  if (auto EC = Reader.readArray<ulittle32_t>(TempAddressMap))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Could not read an address map.");
+  AddressMap.resize(Header->AddrMap / sizeof(uint32_t));
+  std::copy(TempAddressMap.begin(), TempAddressMap.end(), AddressMap.begin());
 
   // Something called "thunk map" follows.
+  std::vector<ulittle32_t> TempThunkMap(Header->NumThunks);
   ThunkMap.resize(Header->NumThunks);
-  if (auto EC = Reader.readArray<uint32_t>(ThunkMap))
+  if (auto EC = Reader.readArray<ulittle32_t>(TempThunkMap))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Could not read a thunk map.");
+  ThunkMap.resize(Header->NumThunks);
+  std::copy(TempThunkMap.begin(), TempThunkMap.end(), ThunkMap.begin());
 
   // Something called "section map" follows.
-  std::vector<SectionOffset> SectionMap(Header->NumSections);
-  if (auto EC = Reader.readArray<SectionOffset>(SectionMap))
+  std::vector<SectionOffset> Offsets(Header->NumSections);
+  if (auto EC = Reader.readArray<SectionOffset>(Offsets))
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Could not read a section map.");
+  for (auto &SO : Offsets) {
+    SectionOffsets.push_back(SO.Off);
+    SectionOffsets.push_back(SO.Isect);
+  }
 
   if (Reader.bytesRemaining() > 0)
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Corrupted publics stream.");
   return Error::success();
+}
+
+iterator_range<codeview::SymbolIterator> PublicsStream::getSymbols() const {
+  using codeview::SymbolIterator;
+  auto SymbolS = Pdb.getPDBSymbolStream();
+  if (SymbolS.takeError()) {
+    return llvm::make_range<SymbolIterator>(SymbolIterator(), SymbolIterator());
+  }
+  SymbolStream &SS = SymbolS.get();
+
+  return SS.getSymbols();
 }
