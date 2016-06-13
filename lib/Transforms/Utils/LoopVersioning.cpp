@@ -44,7 +44,7 @@ LoopVersioning::LoopVersioning(const LoopAccessInfo &LAI, Loop *L, LoopInfo *LI,
 }
 
 void LoopVersioning::setAliasChecks(
-    const SmallVector<RuntimePointerChecking::PointerCheck, 4> Checks) {
+    SmallVector<RuntimePointerChecking::PointerCheck, 4> Checks) {
   AliasChecks = std::move(Checks);
 }
 
@@ -77,7 +77,7 @@ void LoopVersioning::versionLoop(
 
   if (MemRuntimeCheck && SCEVRuntimeCheck) {
     RuntimeCheck = BinaryOperator::Create(Instruction::Or, MemRuntimeCheck,
-                                          SCEVRuntimeCheck, "ldist.safe");
+                                          SCEVRuntimeCheck, "lver.safe");
     if (auto *I = dyn_cast<Instruction>(RuntimeCheck))
       I->insertBefore(RuntimeCheckBB->getTerminator());
   } else

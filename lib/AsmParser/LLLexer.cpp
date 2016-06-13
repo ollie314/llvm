@@ -793,6 +793,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   DWKEYWORD(ATE, DwarfAttEncoding);
   DWKEYWORD(VIRTUALITY, DwarfVirtuality);
   DWKEYWORD(LANG, DwarfLang);
+  DWKEYWORD(CC, DwarfCC);
   DWKEYWORD(OP, DwarfOp);
   DWKEYWORD(MACINFO, DwarfMacinfo);
 #undef DWKEYWORD
@@ -958,7 +959,8 @@ lltok::Kind LLLexer::LexDigitOrNegative() {
     }
   }
 
-  APFloatVal = APFloat(std::atof(TokStart));
+  APFloatVal = APFloat(APFloat::IEEEdouble,
+                       StringRef(TokStart, CurPtr - TokStart));
   return lltok::APFloat;
 }
 
@@ -994,6 +996,7 @@ lltok::Kind LLLexer::LexPositive() {
     }
   }
 
-  APFloatVal = APFloat(std::atof(TokStart));
+  APFloatVal = APFloat(APFloat::IEEEdouble,
+                       StringRef(TokStart, CurPtr - TokStart));
   return lltok::APFloat;
 }

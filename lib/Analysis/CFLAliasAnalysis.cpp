@@ -38,6 +38,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstVisitor.h"
@@ -56,8 +58,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "cfl-aa"
 
-CFLAAResult::CFLAAResult() : AAResultBase() {}
-CFLAAResult::CFLAAResult(CFLAAResult &&Arg) : AAResultBase(std::move(Arg)) {}
+CFLAAResult::CFLAAResult(const TargetLibraryInfo &TLI)
+    : AAResultBase(), TLI(TLI) {}
+CFLAAResult::CFLAAResult(CFLAAResult &&Arg)
+    : AAResultBase(std::move(Arg)), TLI(Arg.TLI) {}
 CFLAAResult::~CFLAAResult() {}
 
 /// Information we have about a function and would like to keep around.
@@ -97,16 +101,17 @@ namespace {
 /// StratifiedInfo Attribute things.
 typedef unsigned StratifiedAttr;
 LLVM_CONSTEXPR unsigned MaxStratifiedAttrIndex = NumStratifiedAttrs;
-LLVM_CONSTEXPR unsigned AttrAllIndex = 0;
-LLVM_CONSTEXPR unsigned AttrGlobalIndex = 1;
-LLVM_CONSTEXPR unsigned AttrUnknownIndex = 2;
+LLVM_CONSTEXPR unsigned AttrEscapedIndex = 0;
+LLVM_CONSTEXPR unsigned AttrUnknownIndex = 1;
+LLVM_CONSTEXPR unsigned AttrGlobalIndex = 2;
 LLVM_CONSTEXPR unsigned AttrFirstArgIndex = 3;
 LLVM_CONSTEXPR unsigned AttrLastArgIndex = MaxStratifiedAttrIndex;
 LLVM_CONSTEXPR unsigned AttrMaxNumArgs = AttrLastArgIndex - AttrFirstArgIndex;
 
 LLVM_CONSTEXPR StratifiedAttr AttrNone = 0;
+LLVM_CONSTEXPR StratifiedAttr AttrEscaped = 1 << AttrEscapedIndex;
 LLVM_CONSTEXPR StratifiedAttr AttrUnknown = 1 << AttrUnknownIndex;
-LLVM_CONSTEXPR StratifiedAttr AttrAll = ~AttrNone;
+LLVM_CONSTEXPR StratifiedAttr AttrGlobal = 1 << AttrGlobalIndex;
 
 /// StratifiedSets call for knowledge of "direction", so this is how we
 /// represent that locally.
@@ -158,10 +163,12 @@ struct Edge {
 class GetEdgesVisitor : public InstVisitor<GetEdgesVisitor, void> {
   CFLAAResult &AA;
   SmallVectorImpl<Edge> &Output;
+  const TargetLibraryInfo &TLI;
 
 public:
-  GetEdgesVisitor(CFLAAResult &AA, SmallVectorImpl<Edge> &Output)
-      : AA(AA), Output(Output) {}
+  GetEdgesVisitor(CFLAAResult &AA, SmallVectorImpl<Edge> &Output,
+                  const TargetLibraryInfo &TLI)
+      : AA(AA), Output(Output), TLI(TLI) {}
 
   void visitInstruction(Instruction &) {
     llvm_unreachable("Unsupported instruction encountered");
@@ -169,7 +176,7 @@ public:
 
   void visitPtrToIntInst(PtrToIntInst &Inst) {
     auto *Ptr = Inst.getOperand(0);
-    Output.push_back(Edge(Ptr, Ptr, EdgeType::Assign, AttrUnknown));
+    Output.push_back(Edge(Ptr, &Inst, EdgeType::Assign, AttrEscaped));
   }
 
   void visitIntToPtrInst(IntToPtrInst &Inst) {
@@ -209,8 +216,6 @@ public:
   void visitGetElementPtrInst(GetElementPtrInst &Inst) {
     auto *Op = Inst.getPointerOperand();
     Output.push_back(Edge(&Inst, Op, EdgeType::Assign, AttrNone));
-    for (auto I = Inst.idx_begin(), E = Inst.idx_end(); I != E; ++I)
-      Output.push_back(Edge(&Inst, *I, EdgeType::Assign, AttrNone));
   }
 
   void visitSelectInst(SelectInst &Inst) {
@@ -247,7 +252,7 @@ public:
     // For now, we'll handle this like a landingpad instruction (by placing the
     // result in its own group, and having that group alias externals).
     auto *Val = &Inst;
-    Output.push_back(Edge(Val, Val, EdgeType::Assign, AttrAll));
+    Output.push_back(Edge(Val, Val, EdgeType::Assign, AttrUnknown));
   }
 
   static bool isFunctionExternal(Function *Fn) {
@@ -340,8 +345,8 @@ public:
           }
         }
         if (AddEdge)
-          Output.push_back(Edge(FuncValue, ArgVal, EdgeType::Assign,
-                                StratifiedAttrs().flip()));
+          Output.push_back(
+              Edge(FuncValue, ArgVal, EdgeType::Assign, Externals));
       }
 
       if (Parameters.size() != Arguments.size())
@@ -376,6 +381,20 @@ public:
   }
 
   template <typename InstT> void visitCallLikeInst(InstT &Inst) {
+    // Check if Inst is a call to a library function that allocates/deallocates
+    // on the heap. Those kinds of functions do not introduce any aliases.
+    // TODO: address other common library functions such as realloc(), strdup(),
+    // etc.
+    if (isMallocLikeFn(&Inst, &TLI) || isCallocLikeFn(&Inst, &TLI)) {
+      Output.push_back(Edge(&Inst, &Inst, EdgeType::Assign, AttrNone));
+      return;
+    } else if (isFreeCall(&Inst, &TLI)) {
+      assert(Inst.getNumArgOperands() == 1);
+      auto argVal = Inst.arg_begin()->get();
+      Output.push_back(Edge(argVal, argVal, EdgeType::Assign, AttrNone));
+      return;
+    }
+
     // TODO: Add support for noalias args/all the other fun function attributes
     // that we can tack on.
     SmallVector<Function *, 4> Targets;
@@ -392,10 +411,10 @@ public:
     // The goal of the loop is in part to unify many Values into one set, so we
     // don't care if the function is void there.
     for (Value *V : Inst.arg_operands())
-      Output.push_back(Edge(&Inst, V, EdgeType::Assign, AttrAll));
+      Output.push_back(Edge(&Inst, V, EdgeType::Assign, AttrUnknown));
     if (Inst.getNumArgOperands() == 0 &&
         Inst.getType() != Type::getVoidTy(Inst.getContext()))
-      Output.push_back(Edge(&Inst, &Inst, EdgeType::Assign, AttrAll));
+      Output.push_back(Edge(&Inst, &Inst, EdgeType::Assign, AttrUnknown));
   }
 
   void visitCallInst(CallInst &Inst) { visitCallLikeInst(Inst); }
@@ -423,7 +442,7 @@ public:
     // Exceptions come from "nowhere", from our analysis' perspective.
     // So we place the instruction its own group, noting that said group may
     // alias externals
-    Output.push_back(Edge(&Inst, &Inst, EdgeType::Assign, AttrAll));
+    Output.push_back(Edge(&Inst, &Inst, EdgeType::Assign, AttrUnknown));
   }
 
   void visitInsertValueInst(InsertValueInst &Inst) {
@@ -634,20 +653,30 @@ typedef DenseMap<Value *, GraphT::Node> NodeMapT;
 // Function declarations that require types defined in the namespace above
 //===----------------------------------------------------------------------===//
 
-/// Given an argument number, returns the appropriate Attr index to set.
-static StratifiedAttr argNumberToAttrIndex(unsigned ArgNum);
+/// Given a StratifiedAttrs, returns true if it marks the corresponding values
+/// as globals or arguments
+static bool isGlobalOrArgAttr(StratifiedAttrs Attr);
 
-/// Given a Value, potentially return which AttrIndex it maps to.
-static Optional<StratifiedAttr> valueToAttrIndex(Value *Val);
+/// Given a StratifiedAttrs, returns true if the corresponding values come from
+/// an unknown source (such as opaque memory or an integer cast)
+static bool isUnknownAttr(StratifiedAttrs Attr);
+
+/// Given an argument number, returns the appropriate StratifiedAttr to set.
+static StratifiedAttr argNumberToAttr(unsigned ArgNum);
+
+/// Given a Value, potentially return which StratifiedAttr it maps to.
+static Optional<StratifiedAttr> valueToAttr(Value *Val);
 
 /// Gets the inverse of a given EdgeType.
 static EdgeType flipWeight(EdgeType Initial);
 
 /// Gets edges of the given Instruction*, writing them to the SmallVector*.
-static void argsToEdges(CFLAAResult &, Instruction *, SmallVectorImpl<Edge> &);
+static void argsToEdges(CFLAAResult &, Instruction *, SmallVectorImpl<Edge> &,
+                        const TargetLibraryInfo &);
 
 /// Gets edges of the given ConstantExpr*, writing them to the SmallVector*.
-static void argsToEdges(CFLAAResult &, ConstantExpr *, SmallVectorImpl<Edge> &);
+static void argsToEdges(CFLAAResult &, ConstantExpr *, SmallVectorImpl<Edge> &,
+                        const TargetLibraryInfo &);
 
 /// Gets the "Level" that one should travel in StratifiedSets
 /// given an EdgeType.
@@ -656,13 +685,15 @@ static Level directionOfEdgeType(EdgeType);
 /// Builds the graph needed for constructing the StratifiedSets for the
 /// given function
 static void buildGraphFrom(CFLAAResult &, Function *,
-                           SmallVectorImpl<Value *> &, NodeMapT &, GraphT &);
+                           SmallVectorImpl<Value *> &, NodeMapT &, GraphT &,
+                           const TargetLibraryInfo &);
 
 /// Gets the edges of a ConstantExpr as if it was an Instruction. This function
 /// also acts on any nested ConstantExprs, adding the edges of those to the
 /// given SmallVector as well.
 static void constexprToEdges(CFLAAResult &, ConstantExpr &,
-                             SmallVectorImpl<Edge> &);
+                             SmallVectorImpl<Edge> &,
+                             const TargetLibraryInfo &);
 
 /// Given an Instruction, this will add it to the graph, along with any
 /// Instructions that are potentially only available from said Instruction
@@ -672,7 +703,7 @@ static void constexprToEdges(CFLAAResult &, ConstantExpr &,
 /// instructions to the graph appropriately.
 static void addInstructionToGraph(CFLAAResult &, Instruction &,
                                   SmallVectorImpl<Value *> &, NodeMapT &,
-                                  GraphT &);
+                                  GraphT &, const TargetLibraryInfo &);
 
 /// Determines whether it would be pointless to add the given Value to our sets.
 static bool canSkipAddingToSets(Value *Val);
@@ -719,23 +750,31 @@ static bool hasUsefulEdges(ConstantExpr *CE) {
          CE->getOpcode() != Instruction::FCmp;
 }
 
-static Optional<StratifiedAttr> valueToAttrIndex(Value *Val) {
+static bool isGlobalOrArgAttr(StratifiedAttrs Attr) {
+  return Attr.reset(AttrEscapedIndex).reset(AttrUnknownIndex).any();
+}
+
+static bool isUnknownAttr(StratifiedAttrs Attr) {
+  return Attr.test(AttrUnknownIndex);
+}
+
+static Optional<StratifiedAttr> valueToAttr(Value *Val) {
   if (isa<GlobalValue>(Val))
-    return AttrGlobalIndex;
+    return AttrGlobal;
 
   if (auto *Arg = dyn_cast<Argument>(Val))
     // Only pointer arguments should have the argument attribute,
     // because things can't escape through scalars without us seeing a
     // cast, and thus, interaction with them doesn't matter.
     if (!Arg->hasNoAliasAttr() && Arg->getType()->isPointerTy())
-      return argNumberToAttrIndex(Arg->getArgNo());
+      return argNumberToAttr(Arg->getArgNo());
   return None;
 }
 
-static StratifiedAttr argNumberToAttrIndex(unsigned ArgNum) {
+static StratifiedAttr argNumberToAttr(unsigned ArgNum) {
   if (ArgNum >= AttrMaxNumArgs)
-    return AttrAllIndex;
-  return ArgNum + AttrFirstArgIndex;
+    return AttrUnknown;
+  return 1 << (ArgNum + AttrFirstArgIndex);
 }
 
 static EdgeType flipWeight(EdgeType Initial) {
@@ -751,17 +790,19 @@ static EdgeType flipWeight(EdgeType Initial) {
 }
 
 static void argsToEdges(CFLAAResult &Analysis, Instruction *Inst,
-                        SmallVectorImpl<Edge> &Output) {
+                        SmallVectorImpl<Edge> &Output,
+                        const TargetLibraryInfo &TLI) {
   assert(hasUsefulEdges(Inst) &&
          "Expected instructions to have 'useful' edges");
-  GetEdgesVisitor v(Analysis, Output);
+  GetEdgesVisitor v(Analysis, Output, TLI);
   v.visit(Inst);
 }
 
 static void argsToEdges(CFLAAResult &Analysis, ConstantExpr *CE,
-                        SmallVectorImpl<Edge> &Output) {
+                        SmallVectorImpl<Edge> &Output,
+                        const TargetLibraryInfo &TLI) {
   assert(hasUsefulEdges(CE) && "Expected constant expr to have 'useful' edges");
-  GetEdgesVisitor v(Analysis, Output);
+  GetEdgesVisitor v(Analysis, Output, TLI);
   v.visitConstantExpr(CE);
 }
 
@@ -779,7 +820,8 @@ static Level directionOfEdgeType(EdgeType Weight) {
 
 static void constexprToEdges(CFLAAResult &Analysis,
                              ConstantExpr &CExprToCollapse,
-                             SmallVectorImpl<Edge> &Results) {
+                             SmallVectorImpl<Edge> &Results,
+                             const TargetLibraryInfo &TLI) {
   SmallVector<ConstantExpr *, 4> Worklist;
   Worklist.push_back(&CExprToCollapse);
 
@@ -792,7 +834,7 @@ static void constexprToEdges(CFLAAResult &Analysis,
       continue;
 
     ConstexprEdges.clear();
-    argsToEdges(Analysis, CExpr, ConstexprEdges);
+    argsToEdges(Analysis, CExpr, ConstexprEdges, TLI);
     for (auto &Edge : ConstexprEdges) {
       if (auto *Nested = dyn_cast<ConstantExpr>(Edge.From))
         if (Visited.insert(Nested).second)
@@ -809,7 +851,8 @@ static void constexprToEdges(CFLAAResult &Analysis,
 
 static void addInstructionToGraph(CFLAAResult &Analysis, Instruction &Inst,
                                   SmallVectorImpl<Value *> &ReturnedValues,
-                                  NodeMapT &Map, GraphT &Graph) {
+                                  NodeMapT &Map, GraphT &Graph,
+                                  const TargetLibraryInfo &TLI) {
   const auto findOrInsertNode = [&Map, &Graph](Value *Val) {
     auto Pair = Map.insert(std::make_pair(Val, GraphT::Node()));
     auto &Iter = Pair.first;
@@ -829,7 +872,7 @@ static void addInstructionToGraph(CFLAAResult &Analysis, Instruction &Inst,
     return;
 
   SmallVector<Edge, 8> Edges;
-  argsToEdges(Analysis, &Inst, Edges);
+  argsToEdges(Analysis, &Inst, Edges, TLI);
 
   // In the case of an unused alloca (or similar), edges may be empty. Note
   // that it exists so we can potentially answer NoAlias.
@@ -861,19 +904,20 @@ static void addInstructionToGraph(CFLAAResult &Analysis, Instruction &Inst,
 
   for (ConstantExpr *CE : ConstantExprs) {
     Edges.clear();
-    constexprToEdges(Analysis, *CE, Edges);
+    constexprToEdges(Analysis, *CE, Edges, TLI);
     std::for_each(Edges.begin(), Edges.end(), addEdgeToGraph);
   }
 }
 
 static void buildGraphFrom(CFLAAResult &Analysis, Function *Fn,
                            SmallVectorImpl<Value *> &ReturnedValues,
-                           NodeMapT &Map, GraphT &Graph) {
+                           NodeMapT &Map, GraphT &Graph,
+                           const TargetLibraryInfo &TLI) {
   // (N.B. We may remove graph construction entirely, because it doesn't really
   // buy us much.)
   for (auto &Bb : Fn->getBasicBlockList())
     for (auto &Inst : Bb.getInstList())
-      addInstructionToGraph(Analysis, Inst, ReturnedValues, Map, Graph);
+      addInstructionToGraph(Analysis, Inst, ReturnedValues, Map, Graph, TLI);
 }
 
 static bool canSkipAddingToSets(Value *Val) {
@@ -903,7 +947,7 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
   GraphT Graph;
   SmallVector<Value *, 4> ReturnedValues;
 
-  buildGraphFrom(*this, Fn, ReturnedValues, Map, Graph);
+  buildGraphFrom(*this, Fn, ReturnedValues, Map, Graph, TLI);
 
   DenseMap<GraphT::Node, Value *> NodeValueMap;
   NodeValueMap.reserve(Map.size());
@@ -919,6 +963,7 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
   StratifiedSetsBuilder<Value *> Builder;
 
   SmallVector<GraphT::Node, 16> Worklist;
+  SmallPtrSet<Value *, 16> Globals;
   for (auto &Pair : Map) {
     Worklist.clear();
 
@@ -932,9 +977,8 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
       if (canSkipAddingToSets(CurValue))
         continue;
 
-      Optional<StratifiedAttr> MaybeCurIndex = valueToAttrIndex(CurValue);
-      if (MaybeCurIndex)
-        Builder.noteAttributes(CurValue, *MaybeCurIndex);
+      if (isa<GlobalValue>(CurValue))
+        Globals.insert(CurValue);
 
       for (const auto &EdgeTuple : Graph.edgesFor(Node)) {
         auto Weight = std::get<0>(EdgeTuple);
@@ -944,6 +988,8 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
 
         if (canSkipAddingToSets(OtherValue))
           continue;
+        if (isa<GlobalValue>(OtherValue))
+          Globals.insert(OtherValue);
 
         bool Added;
         switch (directionOfEdgeType(Label)) {
@@ -959,10 +1005,6 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
         }
 
         auto Aliasing = Weight.second;
-        if (MaybeCurIndex)
-          Aliasing.set(*MaybeCurIndex);
-        if (auto MaybeOtherIndex = valueToAttrIndex(OtherValue))
-          Aliasing.set(*MaybeOtherIndex);
         Builder.noteAttributes(CurValue, Aliasing);
         Builder.noteAttributes(OtherValue, Aliasing);
 
@@ -972,18 +1014,21 @@ CFLAAResult::FunctionInfo CFLAAResult::buildSetsFrom(Function *Fn) {
     }
   }
 
-  // There are times when we end up with parameters not in our graph (i.e. if
-  // it's only used as the condition of a branch). Other bits of code depend on
-  // things that were present during construction being present in the graph.
-  // So, we add all present arguments here.
-  for (auto &Arg : Fn->args()) {
-    if (!Builder.add(&Arg))
-      continue;
+  // Special handling for globals and arguments
+  auto ProcessGlobalOrArgValue = [&Builder](Value &Val) {
+    Builder.add(&Val);
+    auto Attr = valueToAttr(&Val);
+    if (Attr.hasValue()) {
+      Builder.noteAttributes(&Val, *Attr);
+      // TODO: do we need to filter out non-pointer values here?
+      Builder.addAttributesBelow(&Val, AttrUnknown);
+    }
+  };
 
-    auto Attrs = valueToAttrIndex(&Arg);
-    if (Attrs.hasValue())
-      Builder.noteAttributes(&Arg, *Attrs);
-  }
+  for (auto &Arg : Fn->args())
+    ProcessGlobalOrArgValue(Arg);
+  for (auto *Global : Globals)
+    ProcessGlobalOrArgValue(*Global);
 
   return FunctionInfo(Builder.build(), std::move(ReturnedValues));
 }
@@ -1060,31 +1105,31 @@ AliasResult CFLAAResult::query(const MemoryLocation &LocA,
   auto AttrsA = Sets.getLink(SetA.Index).Attrs;
   auto AttrsB = Sets.getLink(SetB.Index).Attrs;
 
-  // Stratified set attributes are used as markets to signify whether a member
-  // of a StratifiedSet (or a member of a set above the current set) has
-  // interacted with either arguments or globals. "Interacted with" meaning its
-  // value may be different depending on the value of an argument or global. The
-  // thought behind this is that, because arguments and globals may alias each
-  // other, if AttrsA and AttrsB have touched args/globals, we must
-  // conservatively say that they alias. However, if at least one of the sets
-  // has no values that could legally be altered by changing the value of an
-  // argument or global, then we don't have to be as conservative.
-  if (AttrsA.any() && AttrsB.any())
+  // If both values are local (meaning the corresponding set has attribute
+  // AttrNone or AttrEscaped), then we know that CFLAA fully models them: they
+  // may-alias each other if and only if they are in the same set
+  // If at least one value is non-local (meaning it either is global/argument or
+  // it comes from unknown sources like integer cast), the situation becomes a
+  // bit more interesting. We follow three general rules described below:
+  // - Non-local values may alias each other
+  // - AttrNone values do not alias any non-local values
+  // - AttrEscaped do not alias globals/arguments, but they may alias
+  // AttrUnknown values
+  if (SetA.Index == SetB.Index)
     return MayAlias;
-
-  // We currently unify things even if the accesses to them may not be in
-  // bounds, so we can't return partial alias here because we don't know whether
-  // the pointer is really within the object or not.
-  // e.g. Given an out of bounds GEP and an alloca'd pointer, we may unify the
-  // two. We can't return partial alias for this case. Since we do not currently
-  // track enough information to differentiate.
-  return SetA.Index == SetB.Index ? MayAlias : NoAlias;
+  if (AttrsA.none() || AttrsB.none())
+    return NoAlias;
+  if (isUnknownAttr(AttrsA) || isUnknownAttr(AttrsB))
+    return MayAlias;
+  if (isGlobalOrArgAttr(AttrsA) && isGlobalOrArgAttr(AttrsB))
+    return MayAlias;
+  return NoAlias;
 }
 
 char CFLAA::PassID;
 
 CFLAAResult CFLAA::run(Function &F, AnalysisManager<Function> &AM) {
-  return CFLAAResult();
+  return CFLAAResult(AM.getResult<TargetLibraryAnalysis>(F));
 }
 
 char CFLAAWrapperPass::ID = 0;
@@ -1097,16 +1142,12 @@ CFLAAWrapperPass::CFLAAWrapperPass() : ImmutablePass(ID) {
   initializeCFLAAWrapperPassPass(*PassRegistry::getPassRegistry());
 }
 
-bool CFLAAWrapperPass::doInitialization(Module &M) {
-  Result.reset(new CFLAAResult());
-  return false;
-}
-
-bool CFLAAWrapperPass::doFinalization(Module &M) {
-  Result.reset();
-  return false;
+void CFLAAWrapperPass::initializePass() {
+  auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
+  Result.reset(new CFLAAResult(TLIWP.getTLI()));
 }
 
 void CFLAAWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
+  AU.addRequired<TargetLibraryInfoWrapperPass>();
 }

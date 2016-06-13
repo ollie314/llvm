@@ -72,13 +72,8 @@ private:
   /// Bits from GlobalObject::GlobalObjectSubclassData.
   enum {
     /// Whether this function is materializable.
-    IsMaterializableBit = 1 << 0,
-    HasMetadataHashEntryBit = 1 << 1
+    IsMaterializableBit = 0,
   };
-  void setGlobalObjectBit(unsigned Mask, bool Value) {
-    setGlobalObjectSubClassData((~Mask & getGlobalObjectSubClassData()) |
-                                (Value ? Mask : 0u));
-  }
 
   friend class SymbolTableListTraits<Function>;
 
@@ -210,12 +205,10 @@ public:
 
   /// @brief Return the attribute for the given attribute kind.
   Attribute getFnAttribute(Attribute::AttrKind Kind) const {
-    if (!hasFnAttribute(Kind))
-      return Attribute();
-    return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
+    return getAttribute(AttributeSet::FunctionIndex, Kind);
   }
   Attribute getFnAttribute(StringRef Kind) const {
-    return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
+    return getAttribute(AttributeSet::FunctionIndex, Kind);
   }
 
   /// \brief Return the stack alignment for the function.
@@ -231,11 +224,14 @@ public:
     return getSubclassDataFromValue() & (1<<14);
   }
   const std::string &getGC() const;
-  void setGC(const std::string Str);
+  void setGC(std::string Str);
   void clearGC();
 
   /// @brief adds the attribute to the list of attributes.
   void addAttribute(unsigned i, Attribute::AttrKind attr);
+
+  /// @brief adds the attribute to the list of attributes.
+  void addAttribute(unsigned i, Attribute Attr);
 
   /// @brief adds the attributes to the list of attributes.
   void addAttributes(unsigned i, AttributeSet attrs);
@@ -249,6 +245,14 @@ public:
   /// @brief check if an attributes is in the list of attributes.
   bool hasAttribute(unsigned i, Attribute::AttrKind attr) const {
     return getAttributes().hasAttribute(i, attr);
+  }
+
+  Attribute getAttribute(unsigned i, Attribute::AttrKind Kind) const {
+    return AttributeSets.getAttribute(i, Kind);
+  }
+
+  Attribute getAttribute(unsigned i, StringRef Kind) const {
+    return AttributeSets.getAttribute(i, Kind);
   }
 
   /// @brief adds the dereferenceable attribute to the list of attributes.
@@ -614,35 +618,6 @@ public:
   /// setjmp or other function that gcc recognizes as "returning twice".
   bool callsFunctionThatReturnsTwice() const;
 
-  /// \brief Check if this has any metadata.
-  bool hasMetadata() const { return hasMetadataHashEntry(); }
-
-  /// \brief Get the current metadata attachment, if any.
-  ///
-  /// Returns \c nullptr if such an attachment is missing.
-  /// @{
-  MDNode *getMetadata(unsigned KindID) const;
-  MDNode *getMetadata(StringRef Kind) const;
-  /// @}
-
-  /// \brief Set a particular kind of metadata attachment.
-  ///
-  /// Sets the given attachment to \c MD, erasing it if \c MD is \c nullptr or
-  /// replacing it if it already exists.
-  /// @{
-  void setMetadata(unsigned KindID, MDNode *MD);
-  void setMetadata(StringRef Kind, MDNode *MD);
-  /// @}
-
-  /// \brief Get all current metadata attachments.
-  void
-  getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const;
-
-  /// \brief Drop metadata not in the given list.
-  ///
-  /// Drop all metadata from \c this not included in \c KnownIDs.
-  void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
-
   /// \brief Set the attached subprogram.
   ///
   /// Calls \a setMetadata() with \a LLVMContext::MD_dbg.
@@ -664,15 +639,6 @@ private:
     Value::setValueSubclassData(D);
   }
   void setValueSubclassDataBit(unsigned Bit, bool On);
-
-  bool hasMetadataHashEntry() const {
-    return getGlobalObjectSubClassData() & HasMetadataHashEntryBit;
-  }
-  void setHasMetadataHashEntry(bool HasEntry) {
-    setGlobalObjectBit(HasMetadataHashEntryBit, HasEntry);
-  }
-
-  void clearMetadata();
 };
 
 template <>

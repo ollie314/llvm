@@ -496,7 +496,7 @@ static unsigned findCommonAlignment(const DataLayout &DL, const StoreInst *SI,
 
 // This method try to lift a store instruction before position P.
 // It will lift the store and its argument + that anything that
-// lay alias with these.
+// may alias with these.
 // The method returns true if it was successful.
 static bool moveUp(AliasAnalysis &AA, StoreInst *SI, Instruction *P) {
   // If the store alias this position, early bail out.
@@ -675,11 +675,19 @@ bool MemCpyOpt::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
       if (C) {
         // Check that nothing touches the dest of the "copy" between
         // the call and the store.
+        Value *CpyDest = SI->getPointerOperand()->stripPointerCasts();
+        bool CpyDestIsLocal = isa<AllocaInst>(CpyDest);
         AliasAnalysis &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
         MemoryLocation StoreLoc = MemoryLocation::get(SI);
         for (BasicBlock::iterator I = --SI->getIterator(), E = C->getIterator();
              I != E; --I) {
           if (AA.getModRefInfo(&*I, StoreLoc) != MRI_NoModRef) {
+            C = nullptr;
+            break;
+          }
+          // The store to dest may never happen if an exception can be thrown
+          // between the load and the store.
+          if (I->mayThrow() && !CpyDestIsLocal) {
             C = nullptr;
             break;
           }
@@ -780,6 +788,11 @@ bool MemCpyOpt::performCallSlotOptzn(Instruction *cpy,
   // src only holds uninitialized values at the moment of the call, meaning that
   // the memcpy can be discarded rather than moved.
 
+  // Lifetime marks shouldn't be operated on.
+  if (Function *F = C->getCalledFunction())
+    if (F->isIntrinsic() && F->getIntrinsicID() == Intrinsic::lifetime_start)
+      return false;
+
   // Deliberately get the source and destination with bitcasts stripped away,
   // because we'll need to do type comparisons based on the underlying type.
   CallSite CS(C);
@@ -815,6 +828,10 @@ bool MemCpyOpt::performCallSlotOptzn(Instruction *cpy,
     if (destSize < srcSize)
       return false;
   } else if (Argument *A = dyn_cast<Argument>(cpyDest)) {
+    // The store to dest may never happen if the call can throw.
+    if (C->mayThrow())
+      return false;
+
     if (A->getDereferenceableBytes() < srcSize) {
       // If the destination is an sret parameter then only accesses that are
       // outside of the returned struct type can trap.

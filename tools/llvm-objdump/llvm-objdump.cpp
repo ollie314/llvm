@@ -59,6 +59,7 @@
 #include <cctype>
 #include <cstring>
 #include <system_error>
+#include <utility>
 
 using namespace llvm;
 using namespace object;
@@ -197,7 +198,7 @@ public:
   SectionFilterIterator(FilterPredicate P,
                         llvm::object::section_iterator const &I,
                         llvm::object::section_iterator const &E)
-      : Predicate(P), Iterator(I), End(E) {
+      : Predicate(std::move(P)), Iterator(I), End(E) {
     ScanPredicate();
   }
   const llvm::object::SectionRef &operator*() const { return *Iterator; }
@@ -224,7 +225,7 @@ private:
 class SectionFilter {
 public:
   SectionFilter(FilterPredicate P, llvm::object::ObjectFile const &O)
-      : Predicate(P), Object(O) {}
+      : Predicate(std::move(P)), Object(O) {}
   SectionFilterIterator begin() {
     return SectionFilterIterator(Predicate, Object.section_begin(),
                                  Object.section_end());
@@ -283,13 +284,16 @@ LLVM_ATTRIBUTE_NORETURN void llvm::report_error(StringRef File,
 
 LLVM_ATTRIBUTE_NORETURN void llvm::report_error(StringRef ArchiveName,
                                                 StringRef FileName,
-                                                llvm::Error E) {
+                                                llvm::Error E,
+                                                StringRef ArchitectureName) {
   assert(E);
   errs() << ToolName << ": ";
   if (ArchiveName != "")
     errs() << ArchiveName << "(" << FileName << ")";
   else
     errs() << FileName;
+  if (!ArchitectureName.empty())
+    errs() << " (for architecture " << ArchitectureName << ")";
   std::string Buf;
   raw_string_ostream OS(Buf);
   logAllUnhandledErrors(std::move(E), OS, "");
@@ -300,15 +304,17 @@ LLVM_ATTRIBUTE_NORETURN void llvm::report_error(StringRef ArchiveName,
 
 LLVM_ATTRIBUTE_NORETURN void llvm::report_error(StringRef ArchiveName,
                                                 const object::Archive::Child &C,
-                                                llvm::Error E) {
+                                                llvm::Error E,
+                                                StringRef ArchitectureName) {
   ErrorOr<StringRef> NameOrErr = C.getName();
   // TODO: if we have a error getting the name then it would be nice to print
   // the index of which archive member this is and or its offset in the
   // archive instead of "???" as the name.
   if (NameOrErr.getError())
-    llvm::report_error(ArchiveName, "???", std::move(E));
+    llvm::report_error(ArchiveName, "???", std::move(E), ArchitectureName);
   else
-    llvm::report_error(ArchiveName, NameOrErr.get(), std::move(E));
+    llvm::report_error(ArchiveName, NameOrErr.get(), std::move(E),
+                       ArchitectureName);
 }
 
 static const Target *getTarget(const ObjectFile *Obj = nullptr) {
@@ -1376,7 +1382,8 @@ void llvm::PrintSectionContents(const ObjectFile *Obj) {
   }
 }
 
-void llvm::PrintSymbolTable(const ObjectFile *o, StringRef ArchiveName) {
+void llvm::PrintSymbolTable(const ObjectFile *o, StringRef ArchiveName,
+                            StringRef ArchitectureName) {
   outs() << "SYMBOL TABLE:\n";
 
   if (const COFFObjectFile *coff = dyn_cast<const COFFObjectFile>(o)) {
@@ -1401,7 +1408,8 @@ void llvm::PrintSymbolTable(const ObjectFile *o, StringRef ArchiveName) {
     } else {
       Expected<StringRef> NameOrErr = Symbol.getName();
       if (!NameOrErr)
-        report_error(ArchiveName, o->getFileName(), NameOrErr.takeError());
+        report_error(ArchiveName, o->getFileName(), NameOrErr.takeError(),
+                     ArchitectureName);
       Name = *NameOrErr;
     }
 
@@ -1728,7 +1736,7 @@ static void DumpInput(StringRef file) {
 
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
 

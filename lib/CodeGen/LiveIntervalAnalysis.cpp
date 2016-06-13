@@ -1314,6 +1314,8 @@ private:
     if (TargetRegisterInfo::isVirtualRegister(Reg)) {
       SlotIndex LastUse = Before;
       for (MachineOperand &MO : MRI.use_nodbg_operands(Reg)) {
+        if (MO.isUndef())
+          continue;
         unsigned SubReg = MO.getSubReg();
         if (SubReg != 0 && LaneMask != 0
             && (TRI.getSubRegIndexLaneMask(SubReg) & LaneMask) == 0)
@@ -1353,7 +1355,7 @@ private:
 
       // Check if MII uses Reg.
       for (MIBundleOperands MO(*MII); MO.isValid(); ++MO)
-        if (MO->isReg() &&
+        if (MO->isReg() && !MO->isUndef() &&
             TargetRegisterInfo::isPhysicalRegister(MO->getReg()) &&
             TRI.hasRegUnit(MO->getReg(), Reg))
           return Idx.getRegSlot();
@@ -1564,22 +1566,6 @@ void LiveIntervals::splitSeparateComponents(LiveInterval &LI,
     SplitLIs.push_back(&NewLI);
   }
   ConEQ.Distribute(LI, SplitLIs.data(), *MRI);
-}
-
-void LiveIntervals::renameDisconnectedComponents() {
-  ConnectedSubRegClasses SubRegClasses(*this, *MRI, *TII);
-
-  // Iterate over all vregs. Note that we query getNumVirtRegs() the newly
-  // created vregs end up with higher numbers but do not need to be visited as
-  // there can't be any further splitting.
-  for (size_t I = 0, E = MRI->getNumVirtRegs(); I < E; ++I) {
-    unsigned Reg = TargetRegisterInfo::index2VirtReg(I);
-    LiveInterval *LI = VirtRegIntervals[Reg];
-    if (LI == nullptr || !LI->hasSubRanges())
-      continue;
-
-    SubRegClasses.renameComponents(*LI);
-  }
 }
 
 void LiveIntervals::constructMainRangeFromSubranges(LiveInterval &LI) {

@@ -33,13 +33,14 @@ using namespace llvm;
 
 #define DEBUG_TYPE "bpf-lower"
 
-static void fail(SDLoc DL, SelectionDAG &DAG, const char *Msg) {
+static void fail(const SDLoc &DL, SelectionDAG &DAG, const char *Msg) {
   MachineFunction &MF = DAG.getMachineFunction();
   DAG.getContext()->diagnose(
       DiagnosticInfoUnsupported(*MF.getFunction(), Msg, DL.getDebugLoc()));
 }
 
-static void fail(SDLoc DL, SelectionDAG &DAG, const char *Msg, SDValue Val) {
+static void fail(const SDLoc &DL, SelectionDAG &DAG, const char *Msg,
+                 SDValue Val) {
   MachineFunction &MF = DAG.getMachineFunction();
   std::string Str;
   raw_string_ostream OS(Str);
@@ -149,8 +150,8 @@ SDValue BPFTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
 
 SDValue BPFTargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
-    const SmallVectorImpl<ISD::InputArg> &Ins, SDLoc DL, SelectionDAG &DAG,
-    SmallVectorImpl<SDValue> &InVals) const {
+    const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
+    SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
   switch (CallConv) {
   default:
     llvm_unreachable("Unsupported calling convention");
@@ -199,6 +200,7 @@ SDValue BPFTargetLowering::LowerFormalArguments(
       }
     } else {
       fail(DL, DAG, "defined with too many args");
+      InVals.push_back(DAG.getConstant(0, DL, VA.getLocVT()));
     }
   }
 
@@ -344,7 +346,8 @@ BPFTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                bool IsVarArg,
                                const SmallVectorImpl<ISD::OutputArg> &Outs,
                                const SmallVectorImpl<SDValue> &OutVals,
-                               SDLoc DL, SelectionDAG &DAG) const {
+                               const SDLoc &DL, SelectionDAG &DAG) const {
+  unsigned Opc = BPFISD::RET_FLAG;
 
   // CCValAssign - represent the assignment of the return value to a location
   SmallVector<CCValAssign, 16> RVLocs;
@@ -355,6 +358,7 @@ BPFTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
   if (MF.getFunction()->getReturnType()->isAggregateType()) {
     fail(DL, DAG, "only integer returns supported");
+    return DAG.getNode(Opc, DL, MVT::Other, Chain);
   }
 
   // Analize return values.
@@ -376,7 +380,6 @@ BPFTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
   }
 
-  unsigned Opc = BPFISD::RET_FLAG;
   RetOps[0] = Chain; // Update chain.
 
   // Add the flag if we have it.
@@ -388,8 +391,8 @@ BPFTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
 SDValue BPFTargetLowering::LowerCallResult(
     SDValue Chain, SDValue InFlag, CallingConv::ID CallConv, bool IsVarArg,
-    const SmallVectorImpl<ISD::InputArg> &Ins, SDLoc DL, SelectionDAG &DAG,
-    SmallVectorImpl<SDValue> &InVals) const {
+    const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
+    SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
 
   MachineFunction &MF = DAG.getMachineFunction();
   // Assign locations to each value returned by this call.
@@ -398,6 +401,9 @@ SDValue BPFTargetLowering::LowerCallResult(
 
   if (Ins.size() >= 2) {
     fail(DL, DAG, "only small returns supported");
+    for (unsigned i = 0, e = Ins.size(); i != e; ++i)
+      InVals.push_back(DAG.getConstant(0, DL, Ins[i].VT));
+    return DAG.getCopyFromReg(Chain, DL, 1, Ins[0].VT, InFlag).getValue(1);
   }
 
   CCInfo.AnalyzeCallResult(Ins, RetCC_BPF64);

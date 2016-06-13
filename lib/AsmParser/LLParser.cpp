@@ -891,6 +891,9 @@ bool LLParser::ParseGlobal(const std::string &Name, LocTy NameLoc,
       unsigned Alignment;
       if (ParseOptionalAlignment(Alignment)) return true;
       GV->setAlignment(Alignment);
+    } else if (Lex.getKind() == lltok::MetadataVar) {
+      if (ParseGlobalObjectMetadataAttachment(*GV))
+        return true;
     } else {
       Comdat *C;
       if (parseOptionalComdat(Name, C))
@@ -1708,17 +1711,24 @@ bool LLParser::ParseInstructionMetadata(Instruction &Inst) {
   return false;
 }
 
+/// ParseGlobalObjectMetadataAttachment
+///   ::= !dbg !57
+bool LLParser::ParseGlobalObjectMetadataAttachment(GlobalObject &GO) {
+  unsigned MDK;
+  MDNode *N;
+  if (ParseMetadataAttachment(MDK, N))
+    return true;
+
+  GO.addMetadata(MDK, *N);
+  return false;
+}
+
 /// ParseOptionalFunctionMetadata
 ///   ::= (!dbg !57)*
 bool LLParser::ParseOptionalFunctionMetadata(Function &F) {
-  while (Lex.getKind() == lltok::MetadataVar) {
-    unsigned MDK;
-    MDNode *N;
-    if (ParseMetadataAttachment(MDK, N))
+  while (Lex.getKind() == lltok::MetadataVar)
+    if (ParseGlobalObjectMetadataAttachment(F))
       return true;
-
-    F.setMetadata(MDK, N);
-  }
   return false;
 }
 
@@ -3331,6 +3341,9 @@ struct DwarfVirtualityField : public MDUnsignedField {
 struct DwarfLangField : public MDUnsignedField {
   DwarfLangField() : MDUnsignedField(0, dwarf::DW_LANG_hi_user) {}
 };
+struct DwarfCCField : public MDUnsignedField {
+  DwarfCCField() : MDUnsignedField(0, dwarf::DW_CC_hi_user) {}
+};
 struct EmissionKindField : public MDUnsignedField {
   EmissionKindField() : MDUnsignedField(0, DICompileUnit::LastEmissionKind) {}
 };
@@ -3469,6 +3482,24 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, DwarfLangField &Result) {
                     "'");
   assert(Lang <= Result.Max && "Expected valid DWARF language");
   Result.assign(Lang);
+  Lex.Lex();
+  return false;
+}
+
+template <>
+bool LLParser::ParseMDField(LocTy Loc, StringRef Name, DwarfCCField &Result) {
+  if (Lex.getKind() == lltok::APSInt)
+    return ParseMDField(Loc, Name, static_cast<MDUnsignedField &>(Result));
+
+  if (Lex.getKind() != lltok::DwarfCC)
+    return TokError("expected DWARF calling convention");
+
+  unsigned CC = dwarf::getCallingConvention(Lex.getStrVal());
+  if (!CC)
+    return TokError("invalid DWARF calling convention" + Twine(" '") + Lex.getStrVal() +
+                    "'");
+  assert(CC <= Result.Max && "Expected valid DWARF calling convention");
+  Result.assign(CC);
   Lex.Lex();
   return false;
 }
@@ -3853,11 +3884,13 @@ bool LLParser::ParseDICompositeType(MDNode *&Result, bool IsDistinct) {
 bool LLParser::ParseDISubroutineType(MDNode *&Result, bool IsDistinct) {
 #define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
   OPTIONAL(flags, DIFlagField, );                                              \
+  OPTIONAL(cc, DwarfCCField, );                                                \
   REQUIRED(types, MDField, );
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
 
-  Result = GET_OR_DISTINCT(DISubroutineType, (Context, flags.Val, types.Val));
+  Result = GET_OR_DISTINCT(DISubroutineType,
+                           (Context, flags.Val, cc.Val, types.Val));
   return false;
 }
 
@@ -4668,7 +4701,7 @@ bool LLParser::ParseFunctionHeader(Function *&Fn, bool isDefine) {
   Fn->setSection(Section);
   Fn->setComdat(C);
   Fn->setPersonalityFn(PersonalityFn);
-  if (!GC.empty()) Fn->setGC(GC.c_str());
+  if (!GC.empty()) Fn->setGC(GC);
   Fn->setPrefixData(Prefix);
   Fn->setPrologueData(Prologue);
   ForwardRefAttrGroups[Fn] = FwdRefAttrGrps;

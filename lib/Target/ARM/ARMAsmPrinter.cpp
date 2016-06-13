@@ -642,9 +642,9 @@ void ARMAsmPrinter::emitAttributes() {
       static_cast<const ARMBaseTargetMachine &>(TM);
   const ARMSubtarget STI(TT, CPU, ArchFS, ATM, ATM.isLittleEndian());
 
-  std::string CPUString = STI.getCPUString();
+  const std::string &CPUString = STI.getCPUString();
 
-  if (CPUString.find("generic") != 0) { //CPUString doesn't start with "generic"
+  if (!StringRef(CPUString).startswith("generic")) {
     // FIXME: remove krait check when GNU tools support krait cpu
     if (STI.isKrait()) {
       ATS.emitTextAttribute(ARMBuildAttrs::CPU_name, "cortex-a9");
@@ -892,11 +892,18 @@ static MCSymbol *getPICLabel(const char *Prefix, unsigned FunctionNumber,
 static MCSymbolRefExpr::VariantKind
 getModifierVariantKind(ARMCP::ARMCPModifier Modifier) {
   switch (Modifier) {
-  case ARMCP::no_modifier: return MCSymbolRefExpr::VK_None;
-  case ARMCP::TLSGD:       return MCSymbolRefExpr::VK_TLSGD;
-  case ARMCP::TPOFF:       return MCSymbolRefExpr::VK_TPOFF;
-  case ARMCP::GOTTPOFF:    return MCSymbolRefExpr::VK_GOTTPOFF;
-  case ARMCP::GOT_PREL:    return MCSymbolRefExpr::VK_ARM_GOT_PREL;
+  case ARMCP::no_modifier:
+    return MCSymbolRefExpr::VK_None;
+  case ARMCP::TLSGD:
+    return MCSymbolRefExpr::VK_TLSGD;
+  case ARMCP::TPOFF:
+    return MCSymbolRefExpr::VK_TPOFF;
+  case ARMCP::GOTTPOFF:
+    return MCSymbolRefExpr::VK_GOTTPOFF;
+  case ARMCP::GOT_PREL:
+    return MCSymbolRefExpr::VK_ARM_GOT_PREL;
+  case ARMCP::SECREL:
+    return MCSymbolRefExpr::VK_SECREL;
   }
   llvm_unreachable("Invalid ARMCPModifier!");
 }

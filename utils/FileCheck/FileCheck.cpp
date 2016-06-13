@@ -1298,8 +1298,15 @@ static void AddCheckPrefixIfNeeded() {
     CheckPrefixes.push_back("CHECK");
 }
 
+static void DumpCommandLine(int argc, char **argv) {
+  errs() << "FileCheck command line: ";
+  for (int I = 0; I < argc; I++)
+    errs() << " " << argv[I];
+  errs() << "\n";
+}
+
 int main(int argc, char **argv) {
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
   cl::ParseCommandLineOptions(argc, argv);
 
@@ -1331,6 +1338,7 @@ int main(int argc, char **argv) {
 
   if (File->getBufferSize() == 0 && !AllowEmptyInput) {
     errs() << "FileCheck error: '" << InputFilename << "' is empty.\n";
+    DumpCommandLine(argc, argv);
     return 2;
   }
 

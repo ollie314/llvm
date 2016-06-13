@@ -218,11 +218,13 @@ bool Argument::hasAttribute(Attribute::AttrKind Kind) const {
 //===----------------------------------------------------------------------===//
 
 bool Function::isMaterializable() const {
-  return getGlobalObjectSubClassData() & IsMaterializableBit;
+  return getGlobalObjectSubClassData() & (1 << IsMaterializableBit);
 }
 
 void Function::setIsMaterializable(bool V) {
-  setGlobalObjectBit(IsMaterializableBit, V);
+  unsigned Mask = 1 << IsMaterializableBit;
+  setGlobalObjectSubClassData((~Mask & getGlobalObjectSubClassData()) |
+                              (V ? Mask : 0u));
 }
 
 LLVMContext &Function::getContext() const {
@@ -370,6 +372,12 @@ void Function::addAttribute(unsigned i, Attribute::AttrKind attr) {
   setAttributes(PAL);
 }
 
+void Function::addAttribute(unsigned i, Attribute Attr) {
+  AttributeSet PAL = getAttributes();
+  PAL = PAL.addAttribute(getContext(), i, Attr);
+  setAttributes(PAL);
+}
+
 void Function::addAttributes(unsigned i, AttributeSet attrs) {
   AttributeSet PAL = getAttributes();
   PAL = PAL.addAttributes(getContext(), i, attrs);
@@ -405,7 +413,7 @@ const std::string &Function::getGC() const {
   return getContext().getGC(*this);
 }
 
-void Function::setGC(const std::string Str) {
+void Function::setGC(std::string Str) {
   setValueSubclassDataBit(14, !Str.empty());
   getContext().setGC(*this, std::move(Str));
 }

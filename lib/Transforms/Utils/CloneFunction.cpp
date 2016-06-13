@@ -122,11 +122,11 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
   SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
   OldFunc->getAllMetadata(MDs);
   for (auto MD : MDs)
-    NewFunc->setMetadata(
+    NewFunc->addMetadata(
         MD.first,
-        MapMetadata(MD.second, VMap,
-                    ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges,
-                    TypeMapper, Materializer));
+        *MapMetadata(MD.second, VMap,
+                     ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges,
+                     TypeMapper, Materializer));
 
   // Loop over all of the basic blocks in the function, cloning them as
   // appropriate.  Note that we save BE this way in order to handle cloning of
@@ -688,11 +688,17 @@ Loop *llvm::cloneLoopWithPreheader(BasicBlock *Before, BasicBlock *LoopDomBB,
     // Update LoopInfo.
     NewLoop->addBasicBlockToLoop(NewBB, *LI);
 
-    // Update DominatorTree.
-    BasicBlock *IDomBB = DT->getNode(BB)->getIDom()->getBlock();
-    DT->addNewBlock(NewBB, cast<BasicBlock>(VMap[IDomBB]));
+    // Add DominatorTree node. After seeing all blocks, update to correct IDom.
+    DT->addNewBlock(NewBB, NewPH);
 
     Blocks.push_back(NewBB);
+  }
+
+  for (BasicBlock *BB : OrigLoop->getBlocks()) {
+    // Update DominatorTree.
+    BasicBlock *IDomBB = DT->getNode(BB)->getIDom()->getBlock();
+    DT->changeImmediateDominator(cast<BasicBlock>(VMap[BB]),
+                                 cast<BasicBlock>(VMap[IDomBB]));
   }
 
   // Move them physically from the end of the block list.

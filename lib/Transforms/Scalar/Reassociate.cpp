@@ -1028,7 +1028,7 @@ Value *ReassociatePass::RemoveFactorFromExpression(Value *V, Value *Factor) {
         }
     } else if (ConstantFP *FC1 = dyn_cast<ConstantFP>(Factor)) {
       if (ConstantFP *FC2 = dyn_cast<ConstantFP>(Factors[i].Op)) {
-        APFloat F1(FC1->getValueAPF());
+        const APFloat &F1 = FC1->getValueAPF();
         APFloat F2(FC2->getValueAPF());
         F2.changeSign();
         if (F1.compare(F2) == APFloat::cmpEqual) {
@@ -2227,8 +2227,13 @@ PreservedAnalyses ReassociatePass::run(Function &F) {
   RankMap.clear();
   ValueRankMap.clear();
 
-  if (MadeChange)
-    return PreservedAnalyses::none();
+  if (MadeChange) {
+    // FIXME: Reassociate should also 'preserve the CFG'.
+    // The new pass manager has currently no way to do it.
+    auto PA = PreservedAnalyses();
+    PA.preserve<GlobalsAA>();
+    return PA;
+  }
 
   return PreservedAnalyses::all();
 }

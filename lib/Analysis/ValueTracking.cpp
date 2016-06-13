@@ -991,8 +991,7 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
   }
   case Instruction::BitCast: {
     Type *SrcTy = I->getOperand(0)->getType();
-    if ((SrcTy->isIntegerTy() || SrcTy->isPointerTy() ||
-         SrcTy->isFloatingPointTy()) &&
+    if ((SrcTy->isIntegerTy() || SrcTy->isPointerTy()) &&
         // TODO: For now, not handling conversions like:
         // (bitcast i64 %x to <2 x i32>)
         !I->getType()->isVectorTy()) {
@@ -1121,7 +1120,7 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
     break;
   case Instruction::URem: {
     if (ConstantInt *Rem = dyn_cast<ConstantInt>(I->getOperand(1))) {
-      APInt RA = Rem->getValue();
+      const APInt &RA = Rem->getValue();
       if (RA.isPowerOf2()) {
         APInt LowBits = (RA - 1);
         computeKnownBits(I->getOperand(0), KnownZero, KnownOne, Depth + 1, Q);
@@ -1316,12 +1315,6 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
         // of bits which might be set provided by popcnt KnownOne2.
         break;
       }
-      case Intrinsic::fabs: {
-        Type *Ty = II->getType();
-        APInt SignBit = APInt::getSignBit(Ty->getScalarSizeInBits());
-        KnownZero |= APInt::getSplat(Ty->getPrimitiveSizeInBits(), SignBit);
-        break;
-      }
       case Intrinsic::x86_sse42_crc32_64_64:
         KnownZero |= APInt::getHighBitsSet(64, 32);
         break;
@@ -1381,9 +1374,8 @@ void computeKnownBits(Value *V, APInt &KnownZero, APInt &KnownOne,
   unsigned BitWidth = KnownZero.getBitWidth();
 
   assert((V->getType()->isIntOrIntVectorTy() ||
-          V->getType()->isFPOrFPVectorTy() ||
           V->getType()->getScalarType()->isPointerTy()) &&
-         "Not integer, floating point, or pointer type!");
+         "Not integer or pointer type!");
   assert((Q.DL.getTypeSizeInBits(V->getType()->getScalarType()) == BitWidth) &&
          (!V->getType()->isIntOrIntVectorTy() ||
           V->getType()->getScalarSizeInBits() == BitWidth) &&
@@ -3373,6 +3365,67 @@ static OverflowResult computeOverflowForSignedAdd(
   return OverflowResult::MayOverflow;
 }
 
+bool llvm::isOverflowIntrinsicNoWrap(IntrinsicInst *II, DominatorTree &DT) {
+#ifndef NDEBUG
+  auto IID = II->getIntrinsicID();
+  assert((IID == Intrinsic::sadd_with_overflow ||
+          IID == Intrinsic::uadd_with_overflow ||
+          IID == Intrinsic::ssub_with_overflow ||
+          IID == Intrinsic::usub_with_overflow ||
+          IID == Intrinsic::smul_with_overflow ||
+          IID == Intrinsic::umul_with_overflow) &&
+         "Not an overflow intrinsic!");
+#endif
+
+  SmallVector<BranchInst *, 2> GuardingBranches;
+  SmallVector<ExtractValueInst *, 2> Results;
+
+  for (User *U : II->users()) {
+    if (auto *EVI = dyn_cast<ExtractValueInst>(U)) {
+      assert(EVI->getNumIndices() == 1 && "Obvious from CI's type");
+
+      if (EVI->getIndices()[0] == 0)
+        Results.push_back(EVI);
+      else {
+        assert(EVI->getIndices()[0] == 1 && "Obvious from CI's type");
+
+        for (auto *U : EVI->users())
+          if (auto *B = dyn_cast<BranchInst>(U)) {
+            assert(B->isConditional() && "How else is it using an i1?");
+            GuardingBranches.push_back(B);
+          }
+      }
+    } else {
+      // We are using the aggregate directly in a way we don't want to analyze
+      // here (storing it to a global, say).
+      return false;
+    }
+  }
+
+  auto AllUsesGuardedByBranch = [&](BranchInst *BI) {
+    BasicBlockEdge NoWrapEdge(BI->getParent(), BI->getSuccessor(1));
+    if (!NoWrapEdge.isSingleEdge())
+      return false;
+
+    // Check if all users of the add are provably no-wrap.
+    for (auto *Result : Results) {
+      // If the extractvalue itself is not executed on overflow, the we don't
+      // need to check each use separately, since domination is transitive.
+      if (DT.dominates(NoWrapEdge, Result->getParent()))
+        continue;
+
+      for (auto &RU : Result->uses())
+        if (!DT.dominates(NoWrapEdge, RU))
+          return false;
+    }
+
+    return true;
+  };
+
+  return any_of(GuardingBranches, AllUsesGuardedByBranch);
+}
+
+
 OverflowResult llvm::computeOverflowForSignedAdd(AddOperator *Add,
                                                  const DataLayout &DL,
                                                  AssumptionCache *AC,
@@ -3391,16 +3444,45 @@ OverflowResult llvm::computeOverflowForSignedAdd(Value *LHS, Value *RHS,
 }
 
 bool llvm::isGuaranteedToTransferExecutionToSuccessor(const Instruction *I) {
-  // FIXME: This conservative implementation can be relaxed. E.g. most
-  // atomic operations are guaranteed to terminate on most platforms
-  // and most functions terminate.
+  // A memory operation returns normally if it isn't volatile. A volatile
+  // operation is allowed to trap.
+  //
+  // An atomic operation isn't guaranteed to return in a reasonable amount of
+  // time because it's possible for another thread to interfere with it for an
+  // arbitrary length of time, but programs aren't allowed to rely on that.
+  if (const LoadInst *LI = dyn_cast<LoadInst>(I))
+    return !LI->isVolatile();
+  if (const StoreInst *SI = dyn_cast<StoreInst>(I))
+    return !SI->isVolatile();
+  if (const AtomicCmpXchgInst *CXI = dyn_cast<AtomicCmpXchgInst>(I))
+    return !CXI->isVolatile();
+  if (const AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I))
+    return !RMWI->isVolatile();
+  if (const MemIntrinsic *MII = dyn_cast<MemIntrinsic>(I))
+    return !MII->isVolatile();
 
-  return !I->isAtomic() &&       // atomics may never succeed on some platforms
-         !isa<CallInst>(I) &&    // could throw and might not terminate
-         !isa<InvokeInst>(I) &&  // might not terminate and could throw to
-                                 //   non-successor (see bug 24185 for details).
-         !isa<ResumeInst>(I) &&  // has no successors
-         !isa<ReturnInst>(I);    // has no successors
+  // If there is no successor, then execution can't transfer to it.
+  if (const auto *CRI = dyn_cast<CleanupReturnInst>(I))
+    return !CRI->unwindsToCaller();
+  if (const auto *CatchSwitch = dyn_cast<CatchSwitchInst>(I))
+    return !CatchSwitch->unwindsToCaller();
+  if (isa<ResumeInst>(I))
+    return false;
+  if (isa<ReturnInst>(I))
+    return false;
+
+  // Calls can throw, or contain an infinite loop, or kill the process.
+  if (CallSite CS = CallSite(const_cast<Instruction*>(I))) {
+    // Calls which don't write to arbitrary memory are safe.
+    // FIXME: Ignoring infinite loops without any side-effects is too aggressive,
+    // but it's consistent with other passes. See http://llvm.org/PR965 .
+    // FIXME: This isn't aggressive enough; a call which only writes to a
+    // global is guaranteed to return.
+    return CS.onlyReadsMemory() || CS.onlyAccessesArgMemory();
+  }
+
+  // Other instructions return normally.
+  return true;
 }
 
 bool llvm::isGuaranteedToExecuteForEveryIteration(const Instruction *I,
@@ -3476,6 +3558,11 @@ bool llvm::propagatesFullPoison(const Instruction *I) {
       }
       return false;
     }
+
+    case Instruction::ICmp:
+      // Comparing poison with any value yields poison.  This is why, for
+      // instance, x s< (x +nsw 1) can be folded to true.
+      return true;
 
     case Instruction::GetElementPtr:
       // A GEP implicitly represents a sequence of additions, subtractions,

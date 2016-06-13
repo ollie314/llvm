@@ -61,6 +61,9 @@ extern char &AMDGPUAnnotateKernelFeaturesID;
 void initializeSIFoldOperandsPass(PassRegistry &);
 extern char &SIFoldOperandsID;
 
+void initializeSIShrinkInstructionsPass(PassRegistry&);
+extern char &SIShrinkInstructionsID;
+
 void initializeSIFixSGPRCopiesPass(PassRegistry &);
 extern char &SIFixSGPRCopiesID;
 
@@ -157,8 +160,6 @@ enum AddressSpaces : unsigned {
   CONSTANT_BUFFER_13 = 21,
   CONSTANT_BUFFER_14 = 22,
   CONSTANT_BUFFER_15 = 23,
-  ADDRESS_NONE = 24, ///< Address space for unknown memory.
-  LAST_ADDRESS = ADDRESS_NONE,
 
   // Some places use this if the address space can't be determined.
   UNKNOWN_ADDRESS_SPACE = ~0u

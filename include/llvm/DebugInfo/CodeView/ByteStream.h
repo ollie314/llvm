@@ -16,28 +16,27 @@
 #include "llvm/Support/Error.h"
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 
 namespace llvm {
 namespace codeview {
 class StreamReader;
 
-class ByteStream : public StreamInterface {
+template <bool Writable = false> class ByteStream : public StreamInterface {
+  typedef typename std::conditional<Writable, MutableArrayRef<uint8_t>,
+                                    ArrayRef<uint8_t>>::type ArrayType;
+
 public:
-  ByteStream();
-  explicit ByteStream(MutableArrayRef<uint8_t> Bytes);
-  explicit ByteStream(uint32_t Length);
-  ~ByteStream() override;
+  ByteStream() {}
+  explicit ByteStream(ArrayType Data) : Data(Data) {}
+  ~ByteStream() override {}
 
-  void reset();
-  void initialize(MutableArrayRef<uint8_t> Bytes);
-  void initialize(uint32_t Length);
-  Error initialize(StreamReader &Reader, uint32_t Length);
+  Error readBytes(uint32_t Offset, uint32_t Size,
+                  ArrayRef<uint8_t> &Buffer) const override;
+  Error readLongestContiguousChunk(uint32_t Offset,
+                                   ArrayRef<uint8_t> &Buffer) const override;
 
-  Error readBytes(uint32_t Offset,
-                  MutableArrayRef<uint8_t> Buffer) const override;
-
-  Error getArrayRef(uint32_t Offset, ArrayRef<uint8_t> &Buffer,
-                    uint32_t Length) const override;
+  Error writeBytes(uint32_t Offset, ArrayRef<uint8_t> Buffer) const override;
 
   uint32_t getLength() const override;
 
@@ -45,9 +44,11 @@ public:
   StringRef str() const;
 
 private:
-  MutableArrayRef<uint8_t> Data;
-  std::unique_ptr<uint8_t[]> Ownership;
+  ArrayType Data;
 };
+
+extern template class ByteStream<true>;
+extern template class ByteStream<false>;
 
 } // end namespace pdb
 } // end namespace llvm

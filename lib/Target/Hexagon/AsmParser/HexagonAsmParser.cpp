@@ -1139,7 +1139,7 @@ bool HexagonAsmParser::parseOperand(OperandVector &Operands) {
           static char const *RParen = ")";
           Operands.push_back(HexagonOperand::CreateToken(LParen, Begin));
           Operands.push_back(HexagonOperand::CreateReg(Register, Begin, End));
-          AsmToken MaybeDotNew = Lexer.getTok();
+          const AsmToken &MaybeDotNew = Lexer.getTok();
           if (MaybeDotNew.is(AsmToken::TokenKind::Identifier) &&
               MaybeDotNew.getString().equals_lower(".new"))
             splitIdentifier(Operands);
@@ -1155,7 +1155,7 @@ bool HexagonAsmParser::parseOperand(OperandVector &Operands) {
           Operands.insert(Operands.end () - 1,
                           HexagonOperand::CreateToken(LParen, Begin));
           Operands.push_back(HexagonOperand::CreateReg(Register, Begin, End));
-          AsmToken MaybeDotNew = Lexer.getTok();
+          const AsmToken &MaybeDotNew = Lexer.getTok();
           if (MaybeDotNew.is(AsmToken::TokenKind::Identifier) &&
               MaybeDotNew.getString().equals_lower(".new"))
             splitIdentifier(Operands);
@@ -1401,7 +1401,6 @@ bool HexagonAsmParser::parseInstruction(OperandVector &Operands) {
       AsmToken const &Token = Parser.getTok();
       if (Token.is(AsmToken::Identifier)) {
         StringRef String = Token.getString();
-        AsmToken IDToken = Token;
         if (String.lower() == "hi") {
           HiOnly = true;
         } else if (String.lower() == "lo") {

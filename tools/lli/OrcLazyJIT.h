@@ -62,9 +62,6 @@ public:
       DtorRunner.runViaLayer(CODLayer);
   }
 
-  static std::unique_ptr<CompileCallbackMgr> createCompileCallbackMgr(Triple T);
-  static IndirectStubsManagerBuilder createIndirectStubsMgrBuilder(Triple T);
-
   ModuleHandleT addModule(std::unique_ptr<Module> M) {
     // Attach a data-layout if one isn't already present.
     if (M->getDataLayout().isDefault())
@@ -86,8 +83,7 @@ public:
       orc::createLambdaResolver(
         [this](const std::string &Name) {
           if (auto Sym = CODLayer.findSymbol(Name, true))
-            return RuntimeDyld::SymbolInfo(Sym.getAddress(),
-                                           Sym.getFlags());
+            return Sym.toRuntimeDyldSymbol();
           if (auto Sym = CXXRuntimeOverrides.searchOverrides(Name))
             return Sym;
 

@@ -319,6 +319,14 @@ public:
     return false;
   }
 
+  /// Return true if it is safe to transform an integer-domain bitwise operation
+  /// into the equivalent floating-point operation. This should be set to true
+  /// if the target has IEEE-754-compliant fabs/fneg operations for the input
+  /// type.
+  virtual bool hasBitPreservingFPLogic(EVT VT) const {
+    return false;
+  }
+
   /// \brief Return if the target supports combining a
   /// chain like:
   /// \code
@@ -1070,14 +1078,20 @@ public:
   ///             LOAD_STACK_GUARD, or customize @llvm.stackguard().
   virtual Value *getIRStackGuard(IRBuilder<> &IRB) const;
 
-  /// Inserts necessary declarations for SSP purpose. Should be used only when
-  /// getIRStackGuard returns nullptr.
+  /// Inserts necessary declarations for SSP (stack protection) purpose.
+  /// Should be used only when getIRStackGuard returns nullptr.
   virtual void insertSSPDeclarations(Module &M) const;
 
   /// Return the variable that's previously inserted by insertSSPDeclarations,
   /// if any, otherwise return nullptr. Should be used only when
   /// getIRStackGuard returns nullptr.
   virtual Value *getSDagStackGuard(const Module &M) const;
+
+  /// If the target has a standard stack protection check function that
+  /// performs validation and error handling, returns the function. Otherwise,
+  /// returns nullptr. Must be previously inserted by insertSSPDeclarations.
+  /// Should be used only when getIRStackGuard returns nullptr.
+  virtual Value *getSSPStackGuardCheck(const Module &M) const;
 
   /// If the target has a standard location for the unsafe stack pointer,
   /// returns the address of that location. Otherwise, returns nullptr.
@@ -2193,15 +2207,15 @@ public:
   bool isInTailCallPosition(SelectionDAG &DAG, SDNode *Node,
                             SDValue &Chain) const;
 
-  void softenSetCCOperands(SelectionDAG &DAG, EVT VT,
-                           SDValue &NewLHS, SDValue &NewRHS,
-                           ISD::CondCode &CCCode, SDLoc DL) const;
+  void softenSetCCOperands(SelectionDAG &DAG, EVT VT, SDValue &NewLHS,
+                           SDValue &NewRHS, ISD::CondCode &CCCode,
+                           const SDLoc &DL) const;
 
   /// Returns a pair of (return value, chain).
   /// It is an error to pass RTLIB::UNKNOWN_LIBCALL as \p LC.
   std::pair<SDValue, SDValue> makeLibCall(SelectionDAG &DAG, RTLIB::Libcall LC,
                                           EVT RetVT, ArrayRef<SDValue> Ops,
-                                          bool isSigned, SDLoc dl,
+                                          bool isSigned, const SDLoc &dl,
                                           bool doesNotReturn = false,
                                           bool isReturnValueUsed = true) const;
 
@@ -2250,7 +2264,7 @@ public:
     /// uses isZExtFree and ZERO_EXTEND for the widening cast, but it could be
     /// generalized for targets with other types of implicit widening casts.
     bool ShrinkDemandedOp(SDValue Op, unsigned BitWidth, const APInt &Demanded,
-                          SDLoc dl);
+                          const SDLoc &dl);
   };
 
   /// Look at Op.  At this point, we know that only the DemandedMask bits of the
@@ -2318,9 +2332,9 @@ public:
 
   /// Try to simplify a setcc built with the specified operands and cc. If it is
   /// unable to simplify it, return a null SDValue.
-  SDValue SimplifySetCC(EVT VT, SDValue N0, SDValue N1,
-                          ISD::CondCode Cond, bool foldBooleans,
-                          DAGCombinerInfo &DCI, SDLoc dl) const;
+  SDValue SimplifySetCC(EVT VT, SDValue N0, SDValue N1, ISD::CondCode Cond,
+                        bool foldBooleans, DAGCombinerInfo &DCI,
+                        const SDLoc &dl) const;
 
   /// Returns true (and the GlobalValue and the offset) if the node is a
   /// GlobalAddress + offset.
@@ -2420,12 +2434,10 @@ public:
   /// should fill in the InVals array with legal-type argument values, and
   /// return the resulting token chain value.
   ///
-  virtual SDValue
-    LowerFormalArguments(SDValue /*Chain*/, CallingConv::ID /*CallConv*/,
-                         bool /*isVarArg*/,
-                         const SmallVectorImpl<ISD::InputArg> &/*Ins*/,
-                         SDLoc /*dl*/, SelectionDAG &/*DAG*/,
-                         SmallVectorImpl<SDValue> &/*InVals*/) const {
+  virtual SDValue LowerFormalArguments(
+      SDValue /*Chain*/, CallingConv::ID /*CallConv*/, bool /*isVarArg*/,
+      const SmallVectorImpl<ISD::InputArg> & /*Ins*/, const SDLoc & /*dl*/,
+      SelectionDAG & /*DAG*/, SmallVectorImpl<SDValue> & /*InVals*/) const {
     llvm_unreachable("Not Implemented");
   }
 
@@ -2492,7 +2504,7 @@ public:
           CallConv(CallingConv::C), DAG(DAG), CS(nullptr), IsPatchPoint(false) {
     }
 
-    CallLoweringInfo &setDebugLoc(SDLoc dl) {
+    CallLoweringInfo &setDebugLoc(const SDLoc &dl) {
       DL = dl;
       return *this;
     }
@@ -2626,12 +2638,12 @@ public:
   /// This hook must be implemented to lower outgoing return values, described
   /// by the Outs array, into the specified DAG. The implementation should
   /// return the resulting token chain value.
-  virtual SDValue
-    LowerReturn(SDValue /*Chain*/, CallingConv::ID /*CallConv*/,
-                bool /*isVarArg*/,
-                const SmallVectorImpl<ISD::OutputArg> &/*Outs*/,
-                const SmallVectorImpl<SDValue> &/*OutVals*/,
-                SDLoc /*dl*/, SelectionDAG &/*DAG*/) const {
+  virtual SDValue LowerReturn(SDValue /*Chain*/, CallingConv::ID /*CallConv*/,
+                              bool /*isVarArg*/,
+                              const SmallVectorImpl<ISD::OutputArg> & /*Outs*/,
+                              const SmallVectorImpl<SDValue> & /*OutVals*/,
+                              const SDLoc & /*dl*/,
+                              SelectionDAG & /*DAG*/) const {
     llvm_unreachable("Not Implemented");
   }
 
@@ -2699,7 +2711,7 @@ public:
   /// which allows a CPU to reuse the result of a previous load indefinitely,
   /// even if a cache-coherent store is performed by another CPU.  The default
   /// implementation does nothing.
-  virtual SDValue prepareVolatileOrAtomicLoad(SDValue Chain, SDLoc DL,
+  virtual SDValue prepareVolatileOrAtomicLoad(SDValue Chain, const SDLoc &DL,
                                               SelectionDAG &DAG) const {
     return Chain;
   }
@@ -3026,7 +3038,7 @@ public:
 private:
   SDValue simplifySetCCWithAnd(EVT VT, SDValue N0, SDValue N1,
                                ISD::CondCode Cond, DAGCombinerInfo &DCI,
-                               SDLoc DL) const;
+                               const SDLoc &DL) const;
 };
 
 /// Given an LLVM IR type and return type attributes, compute the return value

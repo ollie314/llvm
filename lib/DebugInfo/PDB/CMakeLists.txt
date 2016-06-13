@@ -29,6 +29,9 @@ endif()
 
 add_pdb_impl_folder(Raw
   Raw/DbiStream.cpp
+  Raw/EnumTables.cpp
+  Raw/Hash.cpp
+  Raw/IndexedStreamData.cpp
   Raw/InfoStream.cpp
   Raw/MappedBlockStream.cpp
   Raw/ModInfo.cpp
@@ -42,6 +45,7 @@ add_pdb_impl_folder(Raw
   Raw/SymbolStream.cpp
   Raw/TpiStream.cpp)
 
+list(APPEND LIBPDB_ADDITIONAL_HEADER_DIRS "${LLVM_MAIN_INCLUDE_DIR}/llvm/DebugInfo/PDB/Raw")
 list(APPEND LIBPDB_ADDITIONAL_HEADER_DIRS "${LLVM_MAIN_INCLUDE_DIR}/llvm/DebugInfo/PDB")
 
 add_llvm_library(LLVMDebugInfoPDB

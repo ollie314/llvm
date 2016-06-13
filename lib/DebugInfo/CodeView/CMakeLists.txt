@@ -1,13 +1,17 @@
 add_llvm_library(LLVMDebugInfoCodeView
   ByteStream.cpp
   CodeViewError.cpp
+  EnumTables.cpp
   FieldListRecordBuilder.cpp
   Line.cpp
   ListRecordBuilder.cpp
   MemoryTypeTableBuilder.cpp
   MethodListRecordBuilder.cpp
+  ModuleSubstream.cpp
+  ModuleSubstreamVisitor.cpp
   RecordSerialization.cpp
   StreamReader.cpp
+  StreamWriter.cpp
   SymbolDumper.cpp
   TypeDumper.cpp
   TypeRecord.cpp

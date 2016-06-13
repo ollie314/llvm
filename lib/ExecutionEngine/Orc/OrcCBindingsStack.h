@@ -79,9 +79,6 @@ public:
 
   typedef unsigned ModuleHandleT;
 
-  static std::unique_ptr<CompileCallbackMgr> createCompileCallbackMgr(Triple T);
-  static IndirectStubsManagerBuilder createIndirectStubsMgrBuilder(Triple T);
-
   OrcCBindingsStack(TargetMachine &TM,
                     std::unique_ptr<CompileCallbackMgr> CCMgr,
                     IndirectStubsManagerBuilder IndirectStubsMgrBuilder)
@@ -148,7 +145,7 @@ public:
           // 3. External resolver (if present).
 
           if (auto Sym = CODLayer.findSymbol(Name, true))
-            return RuntimeDyld::SymbolInfo(Sym.getAddress(), Sym.getFlags());
+            return Sym.toRuntimeDyldSymbol();
           if (auto Sym = CXXRuntimeOverrides.searchOverrides(Name))
             return Sym;
 

@@ -1646,13 +1646,9 @@ public:
     return Insert(new ShuffleVectorInst(V1, V2, Mask), Name);
   }
 
-  Value *CreateShuffleVector(Value *V1, Value *V2, ArrayRef<int> IntMask,
+  Value *CreateShuffleVector(Value *V1, Value *V2, ArrayRef<uint32_t> IntMask,
                              const Twine &Name = "") {
-    size_t MaskSize = IntMask.size();
-    SmallVector<Constant*, 8> MaskVec(MaskSize);
-    for (size_t i = 0; i != MaskSize; ++i)
-      MaskVec[i] = getInt32(IntMask[i]);
-    Value *Mask = ConstantVector::get(MaskVec);
+    Value *Mask = ConstantDataVector::get(Context, IntMask);
     return CreateShuffleVector(V1, V2, Mask, Name);
   }
 

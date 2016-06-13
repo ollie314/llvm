@@ -1367,7 +1367,7 @@ defm V_FREXP_MANT_F64 : VOP1Inst <vop1<0x3d, 0x31>, "v_frexp_mant_f64",
 >;
 
 defm V_FRACT_F64 : VOP1Inst <vop1<0x3e, 0x32>, "v_fract_f64",
-  VOP_F64_F64
+  VOP_F64_F64, AMDGPUfract
 >;
 } // End SchedRW = [WriteDoubleAdd]
 
@@ -1473,15 +1473,9 @@ defm V_INTERP_MOV_F32 : VINTRP_m <
 // VOP2 Instructions
 //===----------------------------------------------------------------------===//
 
-multiclass V_CNDMASK <vop2 op, string name> {
-  defm _e32 : VOP2_m <op, name, VOP_CNDMASK, [], name>;
-
-  defm _e64  : VOP3_m <
-      op, VOP_CNDMASK.Outs, VOP_CNDMASK.Ins64,
-      name#!cast<string>(VOP_CNDMASK.Asm64), [], name, 3, 0>;
-}
-
-defm V_CNDMASK_B32 : V_CNDMASK<vop2<0x0>, "v_cndmask_b32">;
+defm V_CNDMASK_B32 : VOP2eInst <vop2<0x0, 0x0>, "v_cndmask_b32",
+  VOP2e_I32_I32_I32_I1
+>;
 
 let isCommutable = 1 in {
 defm V_ADD_F32 : VOP2Inst <vop2<0x3, 0x1>, "v_add_f32",
@@ -2469,7 +2463,22 @@ let Predicates = [UnsafeFPMath] in {
 
 def : RsqPat<V_RSQ_F32_e32, f32>;
 def : RsqPat<V_RSQ_F64_e32, f64>;
-}
+
+// Convert (x - floor(x)) to fract(x)
+def : Pat <
+  (f32 (fsub (f32 (VOP3Mods f32:$x, i32:$mods)),
+             (f32 (ffloor (f32 (VOP3Mods f32:$x, i32:$mods)))))),
+  (V_FRACT_F32_e64 $mods, $x, DSTCLAMP.NONE, DSTOMOD.NONE)
+>;
+
+// Convert (x + (-floor(x))) to fract(x)
+def : Pat <
+  (f64 (fadd (f64 (VOP3Mods f64:$x, i32:$mods)),
+             (f64 (fneg (f64 (ffloor (f64 (VOP3Mods f64:$x, i32:$mods)))))))),
+  (V_FRACT_F64_e64 $mods, $x, DSTCLAMP.NONE, DSTOMOD.NONE)
+>;
+
+} // End Predicates = [UnsafeFPMath]
 
 //===----------------------------------------------------------------------===//
 // VOP2 Patterns
@@ -3276,37 +3285,6 @@ def : MUBUFScratchStorePat <BUFFER_STORE_DWORD_OFFEN, i32, store_private>;
 def : MUBUFScratchStorePat <BUFFER_STORE_DWORDX2_OFFEN, v2i32, store_private>;
 def : MUBUFScratchStorePat <BUFFER_STORE_DWORDX4_OFFEN, v4i32, store_private>;
 
-
-multiclass MUBUFCmpSwapPat <Instruction inst_addr64, Instruction inst_offset,
-                            SDPatternOperator node, ValueType data_vt,
-                            ValueType node_vt> {
-
-let Predicates = [isSI] in {
-  def : Pat <
-    (node_vt (node (MUBUFAddr64Atomic v4i32:$srsrc, i64:$vaddr, i32:$soffset,
-	                           i16:$offset, i1:$slc), data_vt:$vdata_in)),
-    (EXTRACT_SUBREG
-      (inst_addr64  $vdata_in, $vaddr, $srsrc, $soffset, $offset, $slc), sub0)
-  >;
-
-}
-
-  def : Pat <
-    (node_vt (node (MUBUFOffsetAtomic v4i32:$srsrc, i32:$soffset, i16:$offset,
-                                   i1:$slc), data_vt:$vdata_in)),
-    (EXTRACT_SUBREG
-      (inst_offset $vdata_in, $srsrc, $soffset, $offset, $slc), sub0)
-  >;
-}
-
-defm : MUBUFCmpSwapPat <BUFFER_ATOMIC_CMPSWAP_RTN_ADDR64,
-                        BUFFER_ATOMIC_CMPSWAP_RTN_OFFSET,
-                        atomic_cmp_swap_global, v2i32, i32>;
-
-defm : MUBUFCmpSwapPat <BUFFER_ATOMIC_CMPSWAP_X2_RTN_ADDR64,
-                        BUFFER_ATOMIC_CMPSWAP_X2_RTN_OFFSET,
-                        atomic_cmp_swap_global, v2i64, i64>;
-
 //===----------------------------------------------------------------------===//
 // MTBUF Patterns
 //===----------------------------------------------------------------------===//
@@ -3548,21 +3526,6 @@ let Predicates = [isSI] in {
 // way to implement it is using V_FRACT_F64.
 // The workaround for the V_FRACT bug is:
 //    fract(x) = isnan(x) ? x : min(V_FRACT(x), 0.99999999999999999)
-
-// Convert (x + (-floor(x)) to fract(x)
-def : Pat <
-  (f64 (fadd (f64 (VOP3Mods f64:$x, i32:$mods)),
-             (f64 (fneg (f64 (ffloor (f64 (VOP3Mods f64:$x, i32:$mods)))))))),
-  (V_CNDMASK_B64_PSEUDO
-      (V_MIN_F64
-          SRCMODS.NONE,
-          (V_FRACT_F64_e64 $mods, $x, DSTCLAMP.NONE, DSTOMOD.NONE),
-          SRCMODS.NONE,
-          (V_MOV_B64_PSEUDO 0x3fefffffffffffff),
-          DSTCLAMP.NONE, DSTOMOD.NONE),
-      $x,
-      (V_CMP_CLASS_F64_e64 SRCMODS.NONE, $x, 3/*NaN*/))
->;
 
 // Convert floor(x) to (x - fract(x))
 def : Pat <

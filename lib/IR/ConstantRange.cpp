@@ -590,7 +590,7 @@ ConstantRange ConstantRange::truncate(uint32_t DstTySize) const {
   // We use the non-wrapped set code to analyze the [Lower, MaxValue) part, and
   // then we do the union with [MaxValue, Upper)
   if (isWrappedSet()) {
-    // if Upper is greater than Max Value, it covers the whole truncated range.
+    // If Upper is greater than Max Value, it covers the whole truncated range.
     if (Upper.uge(MaxValue))
       return ConstantRange(DstTySize, /*isFullSet=*/true);
 
@@ -614,7 +614,7 @@ ConstantRange ConstantRange::truncate(uint32_t DstTySize) const {
     return ConstantRange(LowerDiv.trunc(DstTySize),
                          UpperDiv.trunc(DstTySize)).unionWith(Union);
 
-  // The truncated value wrapps around. Check if we can do better than fullset.
+  // The truncated value wraps around. Check if we can do better than fullset.
   APInt UpperModulo = UpperDiv - MaxBitValue;
   if (UpperModulo.ult(LowerDiv))
     return ConstantRange(LowerDiv.trunc(DstTySize),
@@ -712,6 +712,13 @@ ConstantRange::multiply(const ConstantRange &Other) const {
   ConstantRange Result_zext = ConstantRange(this_min * Other_min,
                                             this_max * Other_max + 1);
   ConstantRange UR = Result_zext.truncate(getBitWidth());
+
+  // If the unsigned range doesn't wrap, and isn't negative then it's a range
+  // from one positive number to another which is as good as we can generate.
+  // In this case, skip the extra work of generating signed ranges which aren't
+  // going to be better than this range.
+  if (!UR.isWrappedSet() && UR.getLower().isNonNegative())
+    return UR;
 
   // Now the signed range. Because we could be dealing with negative numbers
   // here, the lower bound is the smallest of the cartesian product of the
