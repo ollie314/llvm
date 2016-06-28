@@ -49,7 +49,7 @@ namespace {
     bool runOnFunction(Function &F) override;
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.addRequired<LazyValueInfo>();
+      AU.addRequired<LazyValueInfoWrapperPass>();
       AU.addPreserved<GlobalsAAWrapperPass>();
     }
   };
@@ -58,7 +58,7 @@ namespace {
 char CorrelatedValuePropagation::ID = 0;
 INITIALIZE_PASS_BEGIN(CorrelatedValuePropagation, "correlated-propagation",
                 "Value Propagation", false, false)
-INITIALIZE_PASS_DEPENDENCY(LazyValueInfo)
+INITIALIZE_PASS_DEPENDENCY(LazyValueInfoWrapperPass)
 INITIALIZE_PASS_END(CorrelatedValuePropagation, "correlated-propagation",
                 "Value Propagation", false, false)
 
@@ -389,13 +389,13 @@ bool CorrelatedValuePropagation::runOnFunction(Function &F) {
   if (skipFunction(F))
     return false;
 
-  LVI = &getAnalysis<LazyValueInfo>();
+  LVI = &getAnalysis<LazyValueInfoWrapperPass>().getLVI();
 
   bool FnChanged = false;
 
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+  for (BasicBlock &BB : F) {
     bool BBChanged = false;
-    for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ) {
+    for (BasicBlock::iterator BI = BB.begin(), BE = BB.end(); BI != BE;) {
       Instruction *II = &*BI++;
       switch (II->getOpcode()) {
       case Instruction::Select:
@@ -422,7 +422,7 @@ bool CorrelatedValuePropagation::runOnFunction(Function &F) {
       }
     }
 
-    Instruction *Term = FI->getTerminator();
+    Instruction *Term = BB.getTerminator();
     switch (Term->getOpcode()) {
     case Instruction::Switch:
       BBChanged |= processSwitch(cast<SwitchInst>(Term), LVI);

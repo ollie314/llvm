@@ -132,8 +132,9 @@ CodeCoverageTool::attachExpansionSubViews(SourceCoverageView &View,
       continue;
 
     auto SubViewExpansions = ExpansionCoverage.getExpansions();
-    auto SubView = llvm::make_unique<SourceCoverageView>(
-        SourceBuffer.get(), ViewOpts, std::move(ExpansionCoverage));
+    auto SubView =
+        SourceCoverageView::create(Expansion.Function.Name, SourceBuffer.get(),
+                                   ViewOpts, std::move(ExpansionCoverage));
     attachExpansionSubViews(*SubView, SubViewExpansions, Coverage);
     View.addExpansion(Expansion.Region, std::move(SubView));
   }
@@ -150,8 +151,8 @@ CodeCoverageTool::createFunctionView(const FunctionRecord &Function,
     return nullptr;
 
   auto Expansions = FunctionCoverage.getExpansions();
-  auto View = llvm::make_unique<SourceCoverageView>(
-      SourceBuffer.get(), ViewOpts, std::move(FunctionCoverage));
+  auto View = SourceCoverageView::create(Function.Name, SourceBuffer.get(),
+                                         ViewOpts, std::move(FunctionCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
 
   return View;
@@ -168,15 +169,16 @@ CodeCoverageTool::createSourceFileView(StringRef SourceFile,
     return nullptr;
 
   auto Expansions = FileCoverage.getExpansions();
-  auto View = llvm::make_unique<SourceCoverageView>(
-      SourceBuffer.get(), ViewOpts, std::move(FileCoverage));
+  auto View = SourceCoverageView::create(SourceFile, SourceBuffer.get(),
+                                         ViewOpts, std::move(FileCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
 
   for (auto Function : Coverage.getInstantiations(SourceFile)) {
     auto SubViewCoverage = Coverage.getCoverageForFunction(*Function);
     auto SubViewExpansions = SubViewCoverage.getExpansions();
-    auto SubView = llvm::make_unique<SourceCoverageView>(
-        SourceBuffer.get(), ViewOpts, std::move(SubViewCoverage));
+    auto SubView =
+        SourceCoverageView::create(Function->Name, SourceBuffer.get(), ViewOpts,
+                                   std::move(SubViewCoverage));
     attachExpansionSubViews(*SubView, SubViewExpansions, Coverage);
 
     if (SubView) {
@@ -397,6 +399,19 @@ int CodeCoverageTool::show(int argc, const char **argv,
                                    cl::desc("Show function instantiations"),
                                    cl::cat(ViewCategory));
 
+  cl::opt<CoverageViewOptions::OutputFormat> ShowFormat(
+      "format", cl::desc("Output format for line-based coverage reports"),
+      cl::values(clEnumValN(CoverageViewOptions::OutputFormat::Text, "text",
+                            "Text output"),
+                 clEnumValEnd),
+      cl::init(CoverageViewOptions::OutputFormat::Text));
+
+  cl::opt<std::string> ShowOutputDirectory(
+      "output-dir", cl::init(""),
+      cl::desc("Directory in which coverage information is written out"));
+  cl::alias ShowOutputDirectoryA("o", cl::desc("Alias for --output-dir"),
+                                 cl::aliasopt(ShowOutputDirectory));
+
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
@@ -408,6 +423,15 @@ int CodeCoverageTool::show(int argc, const char **argv,
   ViewOpts.ShowLineStatsOrRegionMarkers = ShowBestLineRegionsCounts;
   ViewOpts.ShowExpandedRegions = ShowExpansions;
   ViewOpts.ShowFunctionInstantiations = ShowInstantiations;
+  ViewOpts.ShowFormat = ShowFormat;
+  ViewOpts.ShowOutputDirectory = ShowOutputDirectory;
+
+  if (ViewOpts.ShowOutputDirectory != "") {
+    if (auto E = sys::fs::create_directories(ViewOpts.ShowOutputDirectory)) {
+      error("Could not create output directory!", E.message());
+      return 1;
+    }
+  }
 
   auto Coverage = load();
   if (!Coverage)
@@ -421,16 +445,21 @@ int CodeCoverageTool::show(int argc, const char **argv,
 
       auto mainView = createFunctionView(Function, *Coverage);
       if (!mainView) {
-        ViewOpts.colored_ostream(outs(), raw_ostream::RED)
-            << "warning: Could not read coverage for '" << Function.Name;
-        outs() << "\n";
+        ViewOpts.colored_ostream(errs(), raw_ostream::RED)
+            << "warning: Could not read coverage for '" << Function.Name << "'."
+            << "\n";
         continue;
       }
-      ViewOpts.colored_ostream(outs(), raw_ostream::CYAN) << Function.Name
-                                                          << ":";
-      outs() << "\n";
-      mainView->render(outs(), /*WholeFile=*/false);
-      outs() << "\n";
+
+      auto OSOrErr =
+          mainView->createOutputFile("functions", /*InToplevel=*/true);
+      if (Error E = OSOrErr.takeError()) {
+        error(toString(std::move(E)));
+        return 1;
+      }
+      auto OS = std::move(OSOrErr.get());
+      mainView->print(*OS.get(), /*WholeFile=*/false, /*ShowSourceName=*/true);
+      mainView->closeOutputFile(std::move(OS));
     }
     return 0;
   }
@@ -446,19 +475,21 @@ int CodeCoverageTool::show(int argc, const char **argv,
   for (const auto &SourceFile : SourceFiles) {
     auto mainView = createSourceFileView(SourceFile, *Coverage);
     if (!mainView) {
-      ViewOpts.colored_ostream(outs(), raw_ostream::RED)
+      ViewOpts.colored_ostream(errs(), raw_ostream::RED)
           << "warning: The file '" << SourceFile << "' isn't covered.";
-      outs() << "\n";
+      errs() << "\n";
       continue;
     }
 
-    if (ShowFilenames) {
-      ViewOpts.colored_ostream(outs(), raw_ostream::CYAN) << SourceFile << ":";
-      outs() << "\n";
+    auto OSOrErr = mainView->createOutputFile(SourceFile, /*InToplevel=*/false);
+    if (Error E = OSOrErr.takeError()) {
+      error(toString(std::move(E)));
+      return 1;
     }
-    mainView->render(outs(), /*Wholefile=*/true);
-    if (SourceFiles.size() > 1)
-      outs() << "\n";
+    auto OS = std::move(OSOrErr.get());
+    mainView->print(*OS.get(), /*Wholefile=*/true,
+                    /*ShowSourceName=*/ShowFilenames);
+    mainView->closeOutputFile(std::move(OS));
   }
 
   return 0;

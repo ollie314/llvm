@@ -25,6 +25,7 @@ namespace llvm {
 class SIInstrInfo final : public AMDGPUInstrInfo {
 private:
   const SIRegisterInfo RI;
+  const SISubtarget &ST;
 
   // The the inverse predicate should have the negative value.
   enum BranchPredicate {
@@ -91,9 +92,9 @@ protected:
                                        unsigned OpIdx1) const override;
 
 public:
-  explicit SIInstrInfo(const AMDGPUSubtarget &st);
+  explicit SIInstrInfo(const SISubtarget &);
 
-  const SIRegisterInfo &getRegisterInfo() const override {
+  const SIRegisterInfo &getRegisterInfo() const {
     return RI;
   }
 
@@ -348,6 +349,14 @@ public:
     return get(Opcode).TSFlags & SIInstrFlags::DPP;
   }
 
+  bool isVGPRCopy(const MachineInstr &MI) const {
+    assert(MI.isCopy());
+    unsigned Dest = MI.getOperand(0).getReg();
+    const MachineFunction &MF = *MI.getParent()->getParent();
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    return !RI.isSGPRReg(MRI, Dest);
+  }
+
   bool isInlineConstant(const APInt &Imm) const;
   bool isInlineConstant(const MachineOperand &MO, unsigned OpSize) const;
   bool isLiteralConstant(const MachineOperand &MO, unsigned OpSize) const;
@@ -547,8 +556,9 @@ namespace AMDGPU {
   int getAtomicNoRetOp(uint16_t Opcode);
 
   const uint64_t RSRC_DATA_FORMAT = 0xf00000000000LL;
-  const uint64_t RSRC_TID_ENABLE = 1LL << 55;
-  const uint64_t RSRC_ELEMENT_SIZE_SHIFT = 51;
+  const uint64_t RSRC_ELEMENT_SIZE_SHIFT = (32 + 19);
+  const uint64_t RSRC_INDEX_STRIDE_SHIFT = (32 + 21);
+  const uint64_t RSRC_TID_ENABLE = UINT64_C(1) << (32 + 23);
 } // End namespace AMDGPU
 
 namespace SI {
