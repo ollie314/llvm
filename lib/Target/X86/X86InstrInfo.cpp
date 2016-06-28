@@ -1547,6 +1547,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPSRAWYrr,         X86::VPSRAWYrm,          0 },
     { X86::VPSRAVDrr,         X86::VPSRAVDrm,          0 },
     { X86::VPSRAVDYrr,        X86::VPSRAVDYrm,         0 },
+    { X86::VPSRAVD_Intrr,     X86::VPSRAVD_Intrm,      0 },
+    { X86::VPSRAVD_IntYrr,    X86::VPSRAVD_IntYrm,     0 },
     { X86::VPSRLDYrr,         X86::VPSRLDYrm,          0 },
     { X86::VPSRLQYrr,         X86::VPSRLQYrm,          0 },
     { X86::VPSRLWYrr,         X86::VPSRLWYrm,          0 },
@@ -6284,7 +6286,7 @@ MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
 
     // x86-32 PIC requires a PIC base register for constant pools.
     unsigned PICBase = 0;
-    if (MF.getTarget().getRelocationModel() == Reloc::PIC_) {
+    if (MF.getTarget().isPositionIndependent()) {
       if (Subtarget.is64Bit())
         PICBase = X86::RIP;
       else
@@ -7359,7 +7361,7 @@ namespace {
         return false;
 
       // Only emit a global base reg in PIC mode.
-      if (TM->getRelocationModel() != Reloc::PIC_)
+      if (!TM->isPositionIndependent())
         return false;
 
       X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
