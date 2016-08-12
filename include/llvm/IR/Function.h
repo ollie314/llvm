@@ -139,6 +139,8 @@ public:
   Intrinsic::ID getIntrinsicID() const LLVM_READONLY { return IntID; }
   bool isIntrinsic() const { return getName().startswith("llvm."); }
 
+  static Intrinsic::ID lookupIntrinsicID(StringRef Name);
+
   /// \brief Recalculate the ID for this function if it is an Intrinsic defined
   /// in llvm/Intrinsics.h.  Sets the intrinsic ID to Intrinsic::not_intrinsic
   /// if the name of this function does not match an intrinsic in that header.
@@ -187,6 +189,12 @@ public:
     setAttributes(
       AttributeSets.addAttribute(getContext(),
                                  AttributeSet::FunctionIndex, Kind, Value));
+  }
+
+  /// @brief Remove function attribute from this function.
+  void removeFnAttr(StringRef Kind) {
+    setAttributes(AttributeSets.removeAttribute(
+        getContext(), AttributeSet::FunctionIndex, Kind));
   }
 
   /// Set the entry count for this function.
@@ -296,6 +304,14 @@ public:
   }
   void setOnlyReadsMemory() {
     addFnAttr(Attribute::ReadOnly);
+  }
+
+  /// @brief Determine if the function does not access or only writes memory.
+  bool doesNotReadMemory() const {
+    return doesNotAccessMemory() || hasFnAttribute(Attribute::WriteOnly);
+  }
+  void setDoesNotReadMemory() {
+    addFnAttr(Attribute::WriteOnly);
   }
 
   /// @brief Determine if the call can access memmory only using pointers based
@@ -423,7 +439,7 @@ public:
   }
 
   /// Optimize this function for minimum size (-Oz).
-  bool optForMinSize() const { return hasFnAttribute(Attribute::MinSize); };
+  bool optForMinSize() const { return hasFnAttribute(Attribute::MinSize); }
 
   /// Optimize this function for size (-Os) or minimum size (-Oz).
   bool optForSize() const {

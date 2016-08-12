@@ -18,6 +18,7 @@
 
 #include "llvm/MC/MCDirectives.h"
 #include "llvm/MC/MCDwarf.h"
+#include "llvm/MC/MCTargetOptions.h"
 #include <cassert>
 #include <vector>
 
@@ -40,14 +41,6 @@ enum class EncodingType {
   MIPS = Alpha,
 };
 }
-
-enum class ExceptionHandling {
-  None,     /// No exception support
-  DwarfCFI, /// DWARF-like instruction based exceptions
-  SjLj,     /// setjmp/longjmp based exceptions
-  ARM,      /// ARM EHABI
-  WinEH,    /// Windows Exception Handling
-};
 
 namespace LCOMM {
 enum LCOMMType { NoAlignment, ByteAlignment, Log2Alignment };
@@ -91,12 +84,6 @@ protected:
   /// True if this is a MachO target that supports the macho-specific .tbss
   /// directive for emitting thread local BSS Symbols.  Default is false.
   bool HasMachoTBSSDirective;
-
-  /// True if the compiler should emit a ".reference .constructors_used" or
-  /// ".reference .destructors_used" directive after the static ctor/dtor
-  /// list.  This directive is only emitted in Static relocation model.  Default
-  /// is false.
-  bool HasStaticCtorDtorReferenceInStaticMode;
 
   /// This is the maximum possible length of an instruction, which is needed to
   /// compute the size of an inline asm.  Defaults to 4.
@@ -362,6 +349,9 @@ protected:
   /// construction (see LLVMTargetMachine::initAsmInfo()).
   bool UseIntegratedAssembler;
 
+  /// Preserve Comments in assembly
+  bool PreserveAsmComments;
+
   /// Compress DWARF debug sections. Defaults to no compression.
   DebugCompressionType CompressDebugSections;
 
@@ -372,6 +362,10 @@ protected:
   // If true, emit GOTPCRELX/REX_GOTPCRELX instead of GOTPCREL, on
   // X86_64 ELF.
   bool RelaxELFRelocations = true;
+
+  // If true, then the lexer and expression parser will support %neg(),
+  // %hi(), and similar unary operators.
+  bool HasMipsExpressions = false;
 
 public:
   explicit MCAsmInfo();
@@ -453,9 +447,6 @@ public:
 
   bool hasMachoZeroFillDirective() const { return HasMachoZeroFillDirective; }
   bool hasMachoTBSSDirective() const { return HasMachoTBSSDirective; }
-  bool hasStaticCtorDtorReferenceInStaticMode() const {
-    return HasStaticCtorDtorReferenceInStaticMode;
-  }
   unsigned getMaxInstLength() const { return MaxInstLength; }
   unsigned getMinInstAlignment() const { return MinInstAlignment; }
   bool getDollarIsPC() const { return DollarIsPC; }
@@ -575,6 +566,14 @@ public:
     UseIntegratedAssembler = Value;
   }
 
+  /// Return true if assembly (inline or otherwise) should be parsed.
+  bool preserveAsmComments() const { return PreserveAsmComments; }
+
+  /// Set whether assembly (inline or otherwise) should be parsed.
+  virtual void setPreserveAsmComments(bool Value) {
+    PreserveAsmComments = Value;
+  }
+
   DebugCompressionType compressDebugSections() const {
     return CompressDebugSections;
   }
@@ -587,6 +586,7 @@ public:
 
   bool canRelaxRelocations() const { return RelaxELFRelocations; }
   void setRelaxELFRelocations(bool V) { RelaxELFRelocations = V; }
+  bool hasMipsExpressions() const { return HasMipsExpressions; }
 };
 }
 

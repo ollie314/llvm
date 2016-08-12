@@ -15,7 +15,6 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GraphWriter.h"
-#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -120,10 +119,6 @@ void LazyCallGraph::Node::removeEdgeInternal(Function &Target) {
   EdgeIndexMap.erase(IndexMapI);
 }
 
-raw_ostream &llvm::operator<<(raw_ostream &OS, const LazyCallGraph::Node &N) {
-  return OS << N.F.getName();
-}
-
 void LazyCallGraph::Node::dump() const {
   dbgs() << *this << '\n';
 }
@@ -181,24 +176,6 @@ LazyCallGraph &LazyCallGraph::operator=(LazyCallGraph &&G) {
   return *this;
 }
 
-raw_ostream &llvm::operator<<(raw_ostream &OS, const LazyCallGraph::SCC &C) {
-  OS << '(';
-  int i = 0;
-  for (LazyCallGraph::Node &N : C) {
-    if (i > 0)
-      OS << ", ";
-    // Elide the inner elements if there are too many.
-    if (i > 8) {
-      OS << "..., " << *C.Nodes.back();
-      break;
-    }
-    OS << N;
-    ++i;
-  }
-  OS << ')';
-  return OS;
-}
-
 void LazyCallGraph::SCC::dump() const {
   dbgs() << *this << '\n';
 }
@@ -223,25 +200,6 @@ void LazyCallGraph::SCC::verify() {
 #endif
 
 LazyCallGraph::RefSCC::RefSCC(LazyCallGraph &G) : G(&G) {}
-
-raw_ostream &llvm::operator<<(raw_ostream &OS,
-                              const LazyCallGraph::RefSCC &RC) {
-  OS << '[';
-  int i = 0;
-  for (LazyCallGraph::SCC &C : RC) {
-    if (i > 0)
-      OS << ", ";
-    // Elide the inner elements if there are too many.
-    if (i > 4) {
-      OS << "..., " << *RC.SCCs.back();
-      break;
-    }
-    OS << C;
-    ++i;
-  }
-  OS << ']';
-  return OS;
-}
 
 void LazyCallGraph::RefSCC::dump() const {
   dbgs() << *this << '\n';
@@ -677,10 +635,9 @@ void LazyCallGraph::RefSCC::switchInternalEdgeToRef(Node &SourceN,
       // root DFS number.
       auto SCCNodes = make_range(
           PendingSCCStack.rbegin(),
-          std::find_if(PendingSCCStack.rbegin(), PendingSCCStack.rend(),
-                       [RootDFSNumber](Node *N) {
-                         return N->DFSNumber < RootDFSNumber;
-                       }));
+          find_if(reverse(PendingSCCStack), [RootDFSNumber](const Node *N) {
+            return N->DFSNumber < RootDFSNumber;
+          }));
 
       // Form a new SCC out of these nodes and then clear them off our pending
       // stack.
@@ -949,8 +906,7 @@ void LazyCallGraph::RefSCC::removeOutgoingEdge(Node &SourceN, Node &TargetN) {
   RefSCC &TargetRC = *G->lookupRefSCC(TargetN);
   assert(&TargetRC != this && "The target must not be a member of this RefSCC");
 
-  assert(std::find(G->LeafRefSCCs.begin(), G->LeafRefSCCs.end(), this) ==
-             G->LeafRefSCCs.end() &&
+  assert(!is_contained(G->LeafRefSCCs, this) &&
          "Cannot have a leaf RefSCC source.");
 
   // First remove it from the node.
@@ -1163,10 +1119,9 @@ LazyCallGraph::RefSCC::removeInternalRefEdge(Node &SourceN, Node &TargetN) {
       // root DFS number.
       auto RefSCCNodes = make_range(
           PendingRefSCCStack.rbegin(),
-          std::find_if(PendingRefSCCStack.rbegin(), PendingRefSCCStack.rend(),
-                       [RootDFSNumber](Node *N) {
-                         return N->DFSNumber < RootDFSNumber;
-                       }));
+          find_if(reverse(PendingRefSCCStack), [RootDFSNumber](const Node *N) {
+            return N->DFSNumber < RootDFSNumber;
+          }));
 
       // Mark the postorder number for these nodes and clear them off the
       // stack. We'll use the postorder number to pull them into RefSCCs at the
@@ -1220,11 +1175,11 @@ LazyCallGraph::RefSCC::removeInternalRefEdge(Node &SourceN, Node &TargetN) {
     G->connectRefSCC(*RC);
 
   // Now erase all but the root's SCCs.
-  SCCs.erase(std::remove_if(SCCs.begin(), SCCs.end(),
-                            [&](SCC *C) {
-                              return PostOrderMapping.lookup(&*C->begin()) !=
-                                     RootPostOrderNumber;
-                            }),
+  SCCs.erase(remove_if(SCCs,
+                       [&](SCC *C) {
+                         return PostOrderMapping.lookup(&*C->begin()) !=
+                                RootPostOrderNumber;
+                       }),
              SCCs.end());
 
 #ifndef NDEBUG
@@ -1249,8 +1204,7 @@ LazyCallGraph::RefSCC::removeInternalRefEdge(Node &SourceN, Node &TargetN) {
   if (!Result.empty())
     assert(!IsLeaf && "This SCC cannot be a leaf as we have split out new "
                       "SCCs by removing this edge.");
-  if (!std::any_of(G->LeafRefSCCs.begin(), G->LeafRefSCCs.end(),
-                   [&](RefSCC *C) { return C == this; }))
+  if (none_of(G->LeafRefSCCs, [&](RefSCC *C) { return C == this; }))
     assert(!IsLeaf && "This SCC cannot be a leaf as it already had child "
                       "SCCs before we removed this edge.");
 #endif
@@ -1414,10 +1368,9 @@ void LazyCallGraph::buildSCCs(RefSCC &RC, node_stack_range Nodes) {
       // root DFS number.
       auto SCCNodes = make_range(
           PendingSCCStack.rbegin(),
-          std::find_if(PendingSCCStack.rbegin(), PendingSCCStack.rend(),
-                       [RootDFSNumber](Node *N) {
-                         return N->DFSNumber < RootDFSNumber;
-                       }));
+          find_if(reverse(PendingSCCStack), [RootDFSNumber](const Node *N) {
+            return N->DFSNumber < RootDFSNumber;
+          }));
       // Form a new SCC out of these nodes and then clear them off our pending
       // stack.
       RC.SCCs.push_back(createSCC(RC, SCCNodes));
@@ -1536,9 +1489,9 @@ LazyCallGraph::RefSCC *LazyCallGraph::getNextRefSCCInPostOrder() {
     // root DFS number.
     auto RefSCCNodes = node_stack_range(
         PendingRefSCCStack.rbegin(),
-        std::find_if(
-            PendingRefSCCStack.rbegin(), PendingRefSCCStack.rend(),
-            [RootDFSNumber](Node *N) { return N->DFSNumber < RootDFSNumber; }));
+        find_if(reverse(PendingRefSCCStack), [RootDFSNumber](const Node *N) {
+          return N->DFSNumber < RootDFSNumber;
+        }));
     // Form a new RefSCC out of these nodes and then clear them off our pending
     // stack.
     RefSCC *NewRC = createRefSCC(*this);

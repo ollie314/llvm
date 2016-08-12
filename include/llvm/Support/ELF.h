@@ -310,16 +310,13 @@ enum {
   EM_NORC          = 218, // Nanoradio Optimized RISC
   EM_CSR_KALIMBA   = 219, // CSR Kalimba architecture family
   EM_AMDGPU        = 224, // AMD GPU architecture
+  EM_LANAI         = 244, // Lanai 32-bit processor
+  EM_BPF           = 247, // Linux kernel bpf virtual machine
 
   // A request has been made to the maintainer of the official registry for
   // such numbers for an official value for WebAssembly. As soon as one is
   // allocated, this enum will be updated to use it.
   EM_WEBASSEMBLY   = 0x4157, // WebAssembly architecture
-
-  // A request has been made to the maintainer of the official registry for
-  // an official value for Lanai. As soon as one is allocated, this enum will be
-  // updated to use it.
-  EM_LANAI         = 0x8123, // Lanai 32-bit processor
 };
 
 // Object file classes.
@@ -618,6 +615,11 @@ enum {
 // ELF Relocation types for AMDGPU
 enum {
 #include "ELFRelocs/AMDGPU.def"
+};
+
+// ELF Relocation types for BPF
+enum {
+#include "ELFRelocs/BPF.def"
 };
 
 #undef ELF_RELOC

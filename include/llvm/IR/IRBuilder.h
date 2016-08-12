@@ -67,6 +67,23 @@ protected:
   }
 };
 
+/// Provides an 'InsertHelper' that calls a user-provided callback after
+/// performing the default insertion.
+class IRBuilderCallbackInserter : IRBuilderDefaultInserter {
+  std::function<void(Instruction *)> Callback;
+
+public:
+  IRBuilderCallbackInserter(std::function<void(Instruction *)> Callback)
+      : Callback(Callback) {}
+
+protected:
+  void InsertHelper(Instruction *I, const Twine &Name,
+                    BasicBlock *BB, BasicBlock::iterator InsertPt) const {
+    IRBuilderDefaultInserter::InsertHelper(I, Name, BB, InsertPt);
+    Callback(I);
+  }
+};
+
 /// \brief Common base class shared among various IRBuilders.
 class IRBuilderBase {
   DebugLoc CurDbgLocation;
@@ -446,6 +463,11 @@ public:
   /// If the pointer isn't i8* it will be converted.
   CallInst *CreateLifetimeEnd(Value *Ptr, ConstantInt *Size = nullptr);
 
+  /// Create a call to invariant.start intrinsic.
+  ///
+  /// If the pointer isn't i8* it will be converted.
+  CallInst *CreateInvariantStart(Value *Ptr, ConstantInt *Size = nullptr);
+
   /// \brief Create a call to Masked Load intrinsic
   CallInst *CreateMaskedLoad(Value *Ptr, unsigned Align, Value *Mask,
                              Value *PassThru = nullptr, const Twine &Name = "");
@@ -540,9 +562,9 @@ public:
 
 private:
   /// \brief Create a call to a masked intrinsic with given Id.
-  /// Masked intrinsic has only one overloaded type - data type.
   CallInst *CreateMaskedIntrinsic(Intrinsic::ID Id, ArrayRef<Value *> Ops,
-                                  Type *DataTy, const Twine &Name = "");
+                                  ArrayRef<Type *> OverloadedTypes,
+                                  const Twine &Name = "");
 
   Value *getCastedInt8PtrValue(Value *Ptr);
 };

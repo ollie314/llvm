@@ -205,6 +205,10 @@ multiclass CondExtendedMnemonicA<bits<4> ccmask, string name> {
   }
   def LOCR  : FixedCondUnaryRRF<"locr"##name,  0xB9F2, GR32, GR32, ccmask>;
   def LOCGR : FixedCondUnaryRRF<"locgr"##name, 0xB9E2, GR64, GR64, ccmask>;
+  def LOCHI : FixedCondUnaryRIE<"lochi"##name,  0xEC42, GR64, imm32sx16,
+                                ccmask>;
+  def LOCGHI: FixedCondUnaryRIE<"locghi"##name, 0xEC46, GR64, imm64sx16,
+                                ccmask>;
   def LOC   : FixedCondUnaryRSY<"loc"##name,   0xEBF2, GR32, ccmask, 4>;
   def LOCG  : FixedCondUnaryRSY<"locg"##name,  0xEBE2, GR64, ccmask, 8>;
   def STOC  : FixedCondStoreRSY<"stoc"##name,  0xEBF3, GR32, ccmask, 4>;
@@ -331,6 +335,9 @@ let Defs = [CC] in {
   def BRCTG : BranchUnaryRI<"brctg", 0xA77, GR64>;
 }
 
+def BRXH : BranchBinaryRSI<"brxh", 0x84, GR64>;
+def BRXLE : BranchBinaryRSI<"brxle", 0x85, GR64>;
+
 //===----------------------------------------------------------------------===//
 // Select instructions
 //===----------------------------------------------------------------------===//
@@ -449,6 +456,14 @@ let isCodeGenOnly = 1, Uses = [CC] in {
 let Uses = [CC] in {
   def AsmLOCR  : AsmCondUnaryRRF<"loc",  0xB9F2, GR32, GR32>;
   def AsmLOCGR : AsmCondUnaryRRF<"locg", 0xB9E2, GR64, GR64>;
+}
+let isCodeGenOnly = 1, Uses = [CC] in {
+  def LOCHI  : CondUnaryRIE<"lochi",  0xEC42, GR32, imm32sx16>;
+  def LOCGHI : CondUnaryRIE<"locghi", 0xEC46, GR64, imm64sx16>;
+}
+let Uses = [CC] in {
+  def AsmLOCHI  : AsmCondUnaryRIE<"lochi",  0xEC42, GR32, imm32sx16>;
+  def AsmLOCGHI : AsmCondUnaryRIE<"locghi", 0xEC46, GR64, imm64sx16>;
 }
 
 // Immediate moves.
@@ -702,10 +717,14 @@ def  : StoreGR64PC<STRL, aligned_truncstorei32>;
 //===----------------------------------------------------------------------===//
 
 // Multi-register loads.
+defm LM : LoadMultipleRSPair<"lm", 0x98, 0xEB98, GR32>;
 def LMG : LoadMultipleRSY<"lmg", 0xEB04, GR64>;
+def LMH : LoadMultipleRSY<"lmh", 0xEB96, GRH32>;
 
 // Multi-register stores.
+defm STM : StoreMultipleRSPair<"stm", 0x90, 0xEB90, GR32>;
 def STMG : StoreMultipleRSY<"stmg", 0xEB24, GR64>;
+def STMH : StoreMultipleRSY<"stmh", 0xEB26, GRH32>;
 
 //===----------------------------------------------------------------------===//
 // Byte swaps
@@ -813,6 +832,11 @@ defm : InsertMem<"inserti8", IC32Y, GR32, azextloadi8, bdxaddr20pair>;
 
 defm : InsertMem<"inserti8", IC,  GR64, azextloadi8, bdxaddr12pair>;
 defm : InsertMem<"inserti8", ICY, GR64, azextloadi8, bdxaddr20pair>;
+
+let Defs = [CC] in {
+  defm ICM : TernaryRSPair<"icm", 0xBF, 0xEB81, GR32, 0>;
+  def ICMH : TernaryRSY<"icmh", 0xEB80, GRH32, 0>;
+}
 
 // Insertions of a 16-bit immediate, leaving other bits unaffected.
 // We don't have or_as_insert equivalents of these operations because
@@ -1022,7 +1046,7 @@ let Defs = [CC] in {
   // ANDs of memory.
   let CCValues = 0xC, CompareZeroCCMask = 0x8 in {
     defm N  : BinaryRXPair<"n", 0x54, 0xE354, and, GR32, load, 4>;
-    def  NG : BinaryRXY<"ng", 0xE380, and, GR64, load, 8>; 
+    def  NG : BinaryRXY<"ng", 0xE380, and, GR64, load, 8>;
   }
 
   // AND to memory
@@ -1187,6 +1211,7 @@ def DLG  : BinaryRXY<"dlg",  0xE387, z_udivrem64, GR128, load, 8>;
 // Shift left.
 let hasSideEffects = 0 in {
   defm SLL : BinaryRSAndK<"sll", 0x89, 0xEBDF, shl, GR32>;
+  defm SLA : BinaryRSAndK<"sla", 0x8B, 0xEBDD, null_frag, GR32>;
   def SLLG : BinaryRSY<"sllg", 0xEB0D, shl, GR64>;
 }
 
@@ -1364,6 +1389,9 @@ let Defs = [CC] in {
 
   defm TM : CompareSIPair<"tm", 0x91, 0xEB51, z_tm_mem, anyextloadi8, imm32zx8>;
 }
+
+def TML : InstAlias<"tml\t$R, $I", (TMLL GR32:$R, imm32ll16:$I), 0>;
+def TMH : InstAlias<"tmh\t$R, $I", (TMLH GR32:$R, imm32lh16:$I), 0>;
 
 //===----------------------------------------------------------------------===//
 // Prefetch
@@ -1648,7 +1676,128 @@ let hasSideEffects = 1, Defs = [CC], mayStore = 1 in
                        "stfle\t$BD2",
                        []>;
 
+let hasSideEffects = 1 in {
+  def EX   : InstRX<0x44, (outs), (ins GR64:$R1, bdxaddr12only:$XBD2),
+                  "ex\t$R1, $XBD2", []>;
+  def EXRL : InstRIL<0xC60, (outs), (ins GR64:$R1, pcrel32:$I2),
+                     "exrl\t$R1, $I2", []>;
+}
 
+let Defs = [CC] in {
+  let hasSideEffects = 1 in
+    def PR : InstE<0x0101, (outs), (ins), "pr", []>;
+
+  let mayLoad = 1, mayStore = 1 in
+    def MVCK : InstSSd<0xD9, (outs),
+                             (ins bdxaddr12only:$XBD1, bdaddr12only:$BD2,
+                                  GR64:$R3),
+                       "mvck\t$XBD1, $BD2, $R3", []>;
+}
+
+let mayStore = 1 in
+  def STRAG : InstSSE<0xE502, (outs), (ins bdaddr12only:$BD1, bdaddr12only:$BD2),
+                      "strag\t$BD1, $BD2", []>;
+
+let Defs = [R0D, R1D], mayLoad = 1 in
+  def ECTG : InstSSF<0xC81, (outs),
+                            (ins bdaddr12only:$BD1, bdaddr12only:$BD2, GR64:$R3),
+                     "ectg\t$BD1, $BD2, $R3", []>;
+
+//===----------------------------------------------------------------------===//
+// .insn directive instructions
+//===----------------------------------------------------------------------===//
+
+let isCodeGenOnly = 1 in {
+  def InsnE   : DirectiveInsnE<(outs), (ins imm64zx16:$enc), ".insn e,$enc", []>;
+  def InsnRI  : DirectiveInsnRI<(outs), (ins imm64zx32:$enc, AnyReg:$R1,
+                                             imm32sx16:$I2),
+                                ".insn ri,$enc,$R1,$I2", []>;
+  def InsnRIE : DirectiveInsnRIE<(outs), (ins imm64zx48:$enc, AnyReg:$R1,
+                                              AnyReg:$R3, brtarget16:$I2),
+                                 ".insn rie,$enc,$R1,$R3,$I2", []>;
+  def InsnRIL : DirectiveInsnRIL<(outs), (ins imm64zx48:$enc, AnyReg:$R1,
+                                              brtarget32:$I2),
+                                 ".insn ril,$enc,$R1,$I2", []>;
+  def InsnRILU : DirectiveInsnRIL<(outs), (ins imm64zx48:$enc, AnyReg:$R1,
+                                               uimm32:$I2),
+                                  ".insn rilu,$enc,$R1,$I2", []>;
+  def InsnRIS : DirectiveInsnRIS<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      imm32sx8:$I2, imm32zx4:$M3,
+                                      bdaddr12only:$BD4),
+                                 ".insn ris,$enc,$R1,$I2,$M3,$BD4", []>;
+  def InsnRR : DirectiveInsnRR<(outs),
+                               (ins imm64zx16:$enc, AnyReg:$R1, AnyReg:$R2),
+                               ".insn rr,$enc,$R1,$R2", []>;
+  def InsnRRE : DirectiveInsnRRE<(outs), (ins imm64zx32:$enc,
+                                              AnyReg:$R1, AnyReg:$R2),
+                                 ".insn rre,$enc,$R1,$R2", []>;
+  def InsnRRF : DirectiveInsnRRF<(outs),
+                                 (ins imm64zx32:$enc, AnyReg:$R1, AnyReg:$R2,
+                                      AnyReg:$R3, imm32zx4:$R4),
+                                 ".insn rrf,$enc,$R1,$R2,$R3,$R4", []>;
+  def InsnRRS : DirectiveInsnRRS<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      AnyReg:$R2, imm32zx4:$M3,
+                                      bdaddr12only:$BD4),
+                                 ".insn rrs,$enc,$R1,$R2,$M3,$BD4", []>;
+  def InsnRS  : DirectiveInsnRS<(outs),
+                                (ins imm64zx32:$enc, AnyReg:$R1,
+                                     AnyReg:$R3, bdaddr12only:$BD2),
+                                ".insn rs,$enc,$R1,$R3,$BD2", []>;
+  def InsnRSE : DirectiveInsnRSE<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      AnyReg:$R3, bdaddr12only:$BD2),
+                                 ".insn rse,$enc,$R1,$R3,$BD2", []>;
+  def InsnRSI : DirectiveInsnRSI<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      AnyReg:$R3, brtarget16:$RI2),
+                                 ".insn rsi,$enc,$R1,$R3,$RI2", []>;
+  def InsnRSY : DirectiveInsnRSY<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      AnyReg:$R3, bdaddr20only:$BD2),
+                                 ".insn rsy,$enc,$R1,$R3,$BD2", []>;
+  def InsnRX  : DirectiveInsnRX<(outs), (ins imm64zx32:$enc, AnyReg:$R1,
+                                             bdxaddr12only:$XBD2),
+                                ".insn rx,$enc,$R1,$XBD2", []>;
+  def InsnRXE : DirectiveInsnRXE<(outs), (ins imm64zx48:$enc, AnyReg:$R1,
+                                              bdxaddr12only:$XBD2),
+                                 ".insn rxe,$enc,$R1,$XBD2", []>;
+  def InsnRXF : DirectiveInsnRXF<(outs),
+                                 (ins imm64zx48:$enc, AnyReg:$R1,
+                                      AnyReg:$R3, bdxaddr12only:$XBD2),
+                                 ".insn rxf,$enc,$R1,$R3,$XBD2", []>;
+  def InsnRXY : DirectiveInsnRXY<(outs), (ins imm64zx48:$enc, AnyReg:$R1,
+                                              bdxaddr20only:$XBD2),
+                                 ".insn rxy,$enc,$R1,$XBD2", []>;
+  def InsnS : DirectiveInsnS<(outs),
+                             (ins imm64zx32:$enc, bdaddr12only:$BD2),
+                             ".insn s,$enc,$BD2", []>;
+  def InsnSI : DirectiveInsnSI<(outs),
+                               (ins imm64zx32:$enc, bdaddr12only:$BD1,
+                                    imm32sx8:$I2),
+                               ".insn si,$enc,$BD1,$I2", []>;
+  def InsnSIY : DirectiveInsnSIY<(outs),
+                                 (ins imm64zx48:$enc,
+                                      bdaddr20only:$BD1, imm32zx8:$I2),
+                                 ".insn siy,$enc,$BD1,$I2", []>;
+  def InsnSIL : DirectiveInsnSIL<(outs),
+                                 (ins imm64zx48:$enc, bdaddr12only:$BD1,
+                                      imm32zx16:$I2),
+                                 ".insn sil,$enc,$BD1,$I2", []>;
+  def InsnSS : DirectiveInsnSS<(outs),
+                               (ins imm64zx48:$enc, bdxaddr12only:$XBD1,
+                                    bdaddr12only:$BD2, AnyReg:$R3),
+                               ".insn ss,$enc,$XBD1,$BD2,$R3", []>;
+  def InsnSSE : DirectiveInsnSSE<(outs),
+                                 (ins imm64zx48:$enc,
+                                      bdaddr12only:$BD1,bdaddr12only:$BD2),
+                                 ".insn sse,$enc,$BD1,$BD2", []>;
+  def InsnSSF : DirectiveInsnSSF<(outs),
+                                 (ins imm64zx48:$enc, bdaddr12only:$BD1,
+                                      bdaddr12only:$BD2, AnyReg:$R3),
+                                 ".insn ssf,$enc,$BD1,$BD2,$R3", []>;
+}
 
 //===----------------------------------------------------------------------===//
 // Peepholes.
@@ -1684,6 +1833,37 @@ def : Pat<(sra (shl (i64 (anyext (i32 (z_select_ccmask 1, 0, imm32zx4:$valid,
 // equivalent to (and (xor x, -1), y)
 def : Pat<(and (xor GR64:$x, (i64 -1)), GR64:$y),
                           (XGR GR64:$y, (NGR GR64:$y, GR64:$x))>;
+
+// Shift/rotate instructions only use the last 6 bits of the second operand
+// register, so we can safely use NILL (16 fewer bits than NILF) to only AND the
+// last 16 bits.
+// Complexity is added so that we match this before we match NILF on the AND
+// operation alone.
+let AddedComplexity = 4 in {
+  def : Pat<(shl GR32:$val, (and GR32:$shift, uimm32:$imm)),
+            (SLL GR32:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(sra GR32:$val, (and GR32:$shift, uimm32:$imm)),
+            (SRA GR32:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(srl GR32:$val, (and GR32:$shift, uimm32:$imm)),
+            (SRL GR32:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(shl GR64:$val, (and GR32:$shift, uimm32:$imm)),
+            (SLLG GR64:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(sra GR64:$val, (and GR32:$shift, uimm32:$imm)),
+            (SRAG GR64:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(srl GR64:$val, (and GR32:$shift, uimm32:$imm)),
+            (SRLG GR64:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(rotl GR32:$val, (and GR32:$shift, uimm32:$imm)),
+            (RLL GR32:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+
+  def : Pat<(rotl GR64:$val, (and GR32:$shift, uimm32:$imm)),
+            (RLLG GR64:$val, (NILL GR32:$shift, uimm32:$imm), 0)>;
+}
 
 // Peepholes for turning scalar operations into block operations.
 defm : BlockLoadStore<anyextloadi8, i32, MVCSequence, NCSequence, OCSequence,

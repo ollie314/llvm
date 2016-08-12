@@ -464,6 +464,9 @@ void SIScheduleBlock::releaseSuccessors(SUnit *SU, bool InOrOutBlock) {
   for (SDep& Succ : SU->Succs) {
     SUnit *SuccSU = Succ.getSUnit();
 
+    if (SuccSU->NodeNum >= DAG->SUnits.size())
+        continue;
+
     if (BC->isSUInBlock(SuccSU, ID) != InOrOutBlock)
       continue;
 
@@ -476,8 +479,7 @@ void SIScheduleBlock::releaseSuccessors(SUnit *SU, bool InOrOutBlock) {
 void SIScheduleBlock::nodeScheduled(SUnit *SU) {
   // Is in TopReadySUs
   assert (!SU->NumPredsLeft);
-  std::vector<SUnit*>::iterator I =
-    std::find(TopReadySUs.begin(), TopReadySUs.end(), SU);
+  std::vector<SUnit *>::iterator I = find(TopReadySUs, SU);
   if (I == TopReadySUs.end()) {
     dbgs() << "Data Structure Bug in SI Scheduler\n";
     llvm_unreachable(nullptr);
@@ -1662,10 +1664,6 @@ SIScheduleDAGMI::SIScheduleDAGMI(MachineSchedContext *C) :
 SIScheduleDAGMI::~SIScheduleDAGMI() {
 }
 
-ScheduleDAGInstrs *llvm::createSIMachineScheduler(MachineSchedContext *C) {
-  return new SIScheduleDAGMI(C);
-}
-
 // Code adapted from scheduleDAG.cpp
 // Does a topological sort over the SUs.
 // Both TopDown and BottomUp
@@ -1694,7 +1692,7 @@ void SIScheduleDAGMI::moveLowLatencies() {
 
     for (SDep& PredDep : SU->Preds) {
       SUnit *Pred = PredDep.getSUnit();
-      if (SITII->isLowLatencyInstruction(Pred->getInstr())) {
+      if (SITII->isLowLatencyInstruction(*Pred->getInstr())) {
         IsLowLatencyUser = true;
       }
       if (Pred->NodeNum >= DAGSize)
@@ -1704,7 +1702,7 @@ void SIScheduleDAGMI::moveLowLatencies() {
         MinPos = PredPos + 1;
     }
 
-    if (SITII->isLowLatencyInstruction(SU->getInstr())) {
+    if (SITII->isLowLatencyInstruction(*SU->getInstr())) {
       unsigned BestPos = LastLowLatencyUser + 1;
       if ((int)BestPos <= LastLowLatencyPos)
         BestPos = LastLowLatencyPos + 1;
@@ -1729,7 +1727,7 @@ void SIScheduleDAGMI::moveLowLatencies() {
       bool CopyForLowLat = false;
       for (SDep& SuccDep : SU->Succs) {
         SUnit *Succ = SuccDep.getSUnit();
-        if (SITII->isLowLatencyInstruction(Succ->getInstr())) {
+        if (SITII->isLowLatencyInstruction(*Succ->getInstr())) {
           CopyForLowLat = true;
         }
       }
@@ -1814,19 +1812,19 @@ void SIScheduleDAGMI::schedule()
     SUnit *SU = &SUnits[i];
     unsigned BaseLatReg;
     int64_t OffLatReg;
-    if (SITII->isLowLatencyInstruction(SU->getInstr())) {
+    if (SITII->isLowLatencyInstruction(*SU->getInstr())) {
       IsLowLatencySU[i] = 1;
-      if (SITII->getMemOpBaseRegImmOfs(SU->getInstr(), BaseLatReg,
-                                      OffLatReg, TRI))
+      if (SITII->getMemOpBaseRegImmOfs(*SU->getInstr(), BaseLatReg, OffLatReg,
+                                       TRI))
         LowLatencyOffset[i] = OffLatReg;
-    } else if (SITII->isHighLatencyInstruction(SU->getInstr()))
+    } else if (SITII->isHighLatencyInstruction(*SU->getInstr()))
       IsHighLatencySU[i] = 1;
   }
 
   SIScheduler Scheduler(this);
   Best = Scheduler.scheduleVariant(SISchedulerBlockCreatorVariant::LatenciesAlone,
                                    SISchedulerBlockSchedulerVariant::BlockLatencyRegUsage);
-#if 0 // To enable when handleMove fix lands
+
   // if VGPR usage is extremely high, try other good performing variants
   // which could lead to lower VGPR usage
   if (Best.MaxVGPRUsage > 180) {
@@ -1865,7 +1863,7 @@ void SIScheduleDAGMI::schedule()
         Best = Temp;
     }
   }
-#endif
+
   ScheduledSUnits = Best.SUs;
   ScheduledSUnitsInv.resize(SUnits.size());
 

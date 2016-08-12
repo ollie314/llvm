@@ -1,4 +1,6 @@
-def addrimm12 : ComplexPattern<iPTR, 2, "selectIntAddrMM", [frameindex]>;
+def addrimm11 : ComplexPattern<iPTR, 2, "selectIntAddr11MM", [frameindex]>;
+def addrimm12 : ComplexPattern<iPTR, 2, "selectIntAddr12MM", [frameindex]>;
+def addrimm16 : ComplexPattern<iPTR, 2, "selectIntAddr16MM", [frameindex]>;
 def addrimm4lsl2 : ComplexPattern<iPTR, 2, "selectIntAddrLSL2MM", [frameindex]>;
 
 def simm9_addiusp : Operand<i32> {
@@ -106,6 +108,14 @@ def mem_mm_9 : Operand<i32> {
   let OperandType = "OPERAND_MEMORY";
 }
 
+def mem_mm_11 : Operand<i32> {
+  let PrintMethod = "printMemOperand";
+  let MIOperandInfo = (ops GPR32, simm11);
+  let EncoderMethod = "getMemEncodingMMImm11";
+  let ParserMatchClass = MipsMemSimm11AsmOperand;
+  let OperandType = "OPERAND_MEMORY";
+}
+
 def mem_mm_12 : Operand<i32> {
   let PrintMethod = "printMemOperand";
   let MIOperandInfo = (ops ptr_rc, simm12);
@@ -118,7 +128,7 @@ def mem_mm_16 : Operand<i32> {
   let PrintMethod = "printMemOperand";
   let MIOperandInfo = (ops ptr_rc, simm16);
   let EncoderMethod = "getMemEncodingMMImm16";
-  let ParserMatchClass = MipsMemAsmOperand;
+  let ParserMatchClass = MipsMemSimm16AsmOperand;
   let OperandType = "OPERAND_MEMORY";
 }
 
@@ -461,6 +471,18 @@ class JumpRegCMM16<string opstr, RegisterOperand RO> :
   let isIndirectBranch = 1;
 }
 
+let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, hasDelaySlot = 1,
+    hasExtraSrcRegAllocReq = 1, isCTI = 1, Defs = [AT] in {
+  class TailCall_MM<Instruction JumpInst> :
+    PseudoSE<(outs), (ins calltarget:$target), [], II_J>,
+    PseudoInstExpansion<(JumpInst jmptarget_mm:$target)>;
+
+  class TailCallReg_MM<RegisterOperand RO, Instruction JRInst,
+                       RegisterOperand ResRO = RO> :
+    PseudoSE<(outs), (ins RO:$rs), [(MipsTailCall RO:$rs)], II_JR>,
+    PseudoInstExpansion<(JRInst ResRO:$rs)>;
+}
+
 // Break16 and Sdbbp16
 class BrkSdbbp16MM<string opstr> :
   MicroMipsInst16<(outs), (ins uimm4:$code_),
@@ -651,6 +673,14 @@ let DecoderNamespace = "MicroMips" in {
                  ISA_MICROMIPS32_NOT_MIPS32R6;
   def LWM16_MM : LoadMultMM16<"lwm16">, LWM_FM_MM16<0x4>,
                  ISA_MICROMIPS32_NOT_MIPS32R6;
+  let AdditionalPredicates = [InMicroMips] in {
+    def CFC2_MM : InstSE<(outs GPR32Opnd:$rt), (ins COP2Opnd:$impl),
+                         "cfc2\t$rt, $impl", [], II_CFC2, FrmFR, "cfc2">,
+                  POOL32A_CFTC2_FM_MM<0b1100110100>;
+    def CTC2_MM : InstSE<(outs COP2Opnd:$impl), (ins GPR32Opnd:$rt),
+                         "ctc2\t$rt, $impl", [], II_CTC2, FrmFR, "ctc2">,
+                  POOL32A_CFTC2_FM_MM<0b1101110100>;
+  }
 }
 
 class WaitMM<string opstr> :
@@ -740,8 +770,8 @@ let DecoderNamespace = "MicroMips", Predicates = [InMicroMips] in {
 
   /// Load and Store Instructions - aligned
   let DecoderMethod = "DecodeMemMMImm16" in {
-    def LB_MM  : Load<"lb", GPR32Opnd>, MMRel, LW_FM_MM<0x7>;
-    def LBu_MM : Load<"lbu", GPR32Opnd>, MMRel, LW_FM_MM<0x5>;
+    def LB_MM  : LoadMemory<"lb", GPR32Opnd, mem_mm_16>, MMRel, LW_FM_MM<0x7>;
+    def LBu_MM : LoadMemory<"lbu", GPR32Opnd, mem_mm_16>, MMRel, LW_FM_MM<0x5>;
     def LH_MM  : LoadMemory<"lh", GPR32Opnd, mem_simm16, sextloadi16, II_LH,
                             addrDefault>, MMRel, LW_FM_MM<0xf>;
     def LHu_MM : LoadMemory<"lhu", GPR32Opnd, mem_simm16, zextloadi16, II_LHU>,
@@ -959,6 +989,12 @@ let DecoderNamespace = "MicroMips", Predicates = [InMicroMips] in {
   def PREFX_MM : PrefetchIndexed<"prefx">, POOL32F_PREFX_FM_MM<0x15, 0x1A0>;
 }
 
+let AdditionalPredicates = [InMicroMips] in {
+  def TAILCALL_MM : TailCall_MM<J_MM>, ISA_MIPS1_NOT_32R6_64R6;
+  def TAILCALLREG_MM : TailCallReg_MM<GPR32Opnd, JR_MM>,
+                       ISA_MIPS1_NOT_32R6_64R6;
+}
+
 let DecoderNamespace = "MicroMips" in {
   def RDHWR_MM : MMRel, R6MMR6Rel, ReadHardware<GPR32Opnd, HWRegsOpnd>,
                  RDHWR_FM_MM, ISA_MICROMIPS32_NOT_MIPS32R6;
@@ -970,6 +1006,12 @@ let DecoderNamespace = "MicroMips" in {
 //===----------------------------------------------------------------------===//
 // MicroMips arbitrary patterns that map to one or more instructions
 //===----------------------------------------------------------------------===//
+
+def : MipsPat<(i32 immLi16:$imm),
+              (LI16_MM immLi16:$imm)>;
+
+let AdditionalPredicates = [InMicroMips] in
+defm :  MaterializeImms<i32, ZERO, ADDiu_MM, LUi_MM, ORi_MM>;
 
 let Predicates = [InMicroMips] in {
   def : MipsPat<(i32 immLi16:$imm),
@@ -1037,6 +1079,15 @@ def : MipsPat<(atomic_load_16 addr:$a),
 def : MipsPat<(i32 (extloadi16 addr:$src)),
               (LHu_MM addr:$src)>;
 
+defm : BrcondPats<GPR32, BEQ_MM, BEQ_MM, BNE_MM, SLT_MM, SLTu_MM, SLTi_MM,
+                  SLTiu_MM, ZERO>;
+
+defm : SeteqPats<GPR32, SLTiu_MM, XOR_MM, SLTu_MM, ZERO>;
+defm : SetlePats<GPR32, XORi_MM, SLT_MM, SLTu_MM>;
+defm : SetgtPats<GPR32, SLT_MM, SLTu_MM>;
+defm : SetgePats<GPR32, XORi_MM, SLT_MM, SLTu_MM>;
+defm : SetgeImmPats<GPR32, XORi_MM, SLTi_MM, SLTiu_MM>;
+
 //===----------------------------------------------------------------------===//
 // MicroMips instruction aliases
 //===----------------------------------------------------------------------===//
@@ -1070,6 +1121,24 @@ let Predicates = [InMicroMips] in {
                       (TLTU_MM GPR32Opnd:$rs, GPR32Opnd:$rt, 0), 1>;
   def : MipsInstAlias<"tne $rs, $rt",
                       (TNE_MM GPR32Opnd:$rs, GPR32Opnd:$rt, 0), 1>;
+  def : MipsInstAlias<
+          "sgt $rd, $rs, $rt",
+          (SLT_MM GPR32Opnd:$rd, GPR32Opnd:$rt, GPR32Opnd:$rs), 0>;
+  def : MipsInstAlias<
+          "sgt $rs, $rt",
+          (SLT_MM GPR32Opnd:$rs, GPR32Opnd:$rt, GPR32Opnd:$rs), 0>;
+  def : MipsInstAlias<
+          "sgtu $rd, $rs, $rt",
+          (SLTu_MM GPR32Opnd:$rd, GPR32Opnd:$rt, GPR32Opnd:$rs), 0>;
+  def : MipsInstAlias<
+          "sgtu $rs, $rt",
+          (SLTu_MM GPR32Opnd:$rs, GPR32Opnd:$rt, GPR32Opnd:$rs), 0>;
+  def : MipsInstAlias<"slt $rs, $rt, $imm",
+                      (SLTi_MM GPR32Opnd:$rs, GPR32Opnd:$rt,
+                               simm32_relaxed:$imm), 0>;
+  def : MipsInstAlias<"sltu $rs, $rt, $imm",
+                      (SLTiu_MM GPR32Opnd:$rs, GPR32Opnd:$rt,
+                                simm32_relaxed:$imm), 0>;
   def : MipsInstAlias<"sll $rd, $rt, $rs",
                       (SLLV_MM GPR32Opnd:$rd, GPR32Opnd:$rt, GPR32Opnd:$rs), 0>;
   def : MipsInstAlias<"sra $rd, $rt, $rs",
@@ -1105,4 +1174,8 @@ let Predicates = [InMicroMips] in {
                       (XORi_MM GPR32Opnd:$rs, GPR32Opnd:$rs, uimm16:$imm), 0>;
   def : MipsInstAlias<"not $rt, $rs",
                       (NOR_MM GPR32Opnd:$rt, GPR32Opnd:$rs, ZERO), 0>;
+  def : MipsInstAlias<"bnez $rs,$offset",
+                      (BNE_MM GPR32Opnd:$rs, ZERO, brtarget:$offset), 0>;
+  def : MipsInstAlias<"beqz $rs,$offset",
+                      (BEQ_MM GPR32Opnd:$rs, ZERO, brtarget:$offset), 0>;
 }

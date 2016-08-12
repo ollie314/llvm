@@ -564,9 +564,9 @@ void LiveIntervals::shrinkToUses(LiveInterval::SubRange &SR, unsigned Reg)
       continue;
     if (VNI->isPHIDef()) {
       // This is a dead PHI. Remove it.
+      DEBUG(dbgs() << "Dead PHI at " << VNI->def << " may separate interval\n");
       VNI->markUnused();
       SR.removeSegment(*Segment);
-      DEBUG(dbgs() << "Dead PHI at " << VNI->def << " may separate interval\n");
     }
   }
 
@@ -1039,6 +1039,8 @@ private:
           LiveRange::iterator Prev = std::prev(NewIdxIn);
           Prev->end = NewIdx.getRegSlot();
         }
+        // Extend OldIdxIn.
+        OldIdxIn->end = Next->start;
         return;
       }
 
@@ -1394,6 +1396,11 @@ void LiveIntervals::repairOldRegInRange(const MachineBasicBlock::iterator Begin,
                                         LaneBitmask LaneMask) {
   LiveInterval::iterator LII = LR.find(endIdx);
   SlotIndex lastUseIdx;
+  if (LII == LR.begin()) {
+    // This happens when the function is called for a subregister that only
+    // occurs _after_ the range that is to be repaired.
+    return;
+  }
   if (LII != LR.end() && LII->start < endIdx)
     lastUseIdx = LII->end;
   else

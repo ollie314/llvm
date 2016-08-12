@@ -13,11 +13,12 @@
 #include "llvm/DebugInfo/CodeView/EnumTables.h"
 #include "llvm/DebugInfo/CodeView/ModuleSubstreamVisitor.h"
 #include "llvm/DebugInfo/CodeView/SymbolDumper.h"
+#include "llvm/DebugInfo/MSF/MappedBlockStream.h"
+#include "llvm/DebugInfo/MSF/StreamReader.h"
 #include "llvm/DebugInfo/PDB/PDBExtras.h"
 #include "llvm/DebugInfo/PDB/Raw/DbiStream.h"
 #include "llvm/DebugInfo/PDB/Raw/EnumTables.h"
 #include "llvm/DebugInfo/PDB/Raw/ISectionContribVisitor.h"
-#include "llvm/DebugInfo/PDB/Raw/IndexedStreamData.h"
 #include "llvm/DebugInfo/PDB/Raw/InfoStream.h"
 #include "llvm/DebugInfo/PDB/Raw/ModInfo.h"
 #include "llvm/DebugInfo/PDB/Raw/ModStream.h"
@@ -31,7 +32,50 @@
 
 using namespace llvm;
 using namespace llvm::codeview;
+using namespace llvm::msf;
 using namespace llvm::pdb;
+
+namespace {
+struct PageStats {
+  explicit PageStats(const BitVector &FreePages)
+      : Upm(FreePages), ActualUsedPages(FreePages.size()),
+        MultiUsePages(FreePages.size()), UseAfterFreePages(FreePages.size()) {
+    const_cast<BitVector &>(Upm).flip();
+    // To calculate orphaned pages, we start with the set of pages that the
+    // MSF thinks are used.  Each time we find one that actually *is* used,
+    // we unset it.  Whichever bits remain set at the end are orphaned.
+    OrphanedPages = Upm;
+  }
+
+  // The inverse of the MSF File's copy of the Fpm.  The basis for which we
+  // determine the allocation status of each page.
+  const BitVector Upm;
+
+  // Pages which are marked as used in the FPM and are used at least once.
+  BitVector ActualUsedPages;
+
+  // Pages which are marked as used in the FPM but are used more than once.
+  BitVector MultiUsePages;
+
+  // Pages which are marked as used in the FPM but are not used at all.
+  BitVector OrphanedPages;
+
+  // Pages which are marked free in the FPM but are used.
+  BitVector UseAfterFreePages;
+};
+}
+
+static void recordKnownUsedPage(PageStats &Stats, uint32_t UsedIndex) {
+  if (Stats.Upm.test(UsedIndex)) {
+    if (Stats.ActualUsedPages.test(UsedIndex))
+      Stats.MultiUsePages.set(UsedIndex);
+    Stats.ActualUsedPages.set(UsedIndex);
+    Stats.OrphanedPages.reset(UsedIndex);
+  } else {
+    // The MSF doesn't think this page is used, but it is.
+    Stats.UseAfterFreePages.set(UsedIndex);
+  }
+}
 
 static void printSectionOffset(llvm::raw_ostream &OS,
                                const SectionOffset &Off) {
@@ -39,21 +83,71 @@ static void printSectionOffset(llvm::raw_ostream &OS,
 }
 
 LLVMOutputStyle::LLVMOutputStyle(PDBFile &File)
-    : File(File), P(outs()), TD(&P, false) {}
+    : File(File), P(outs()), Dumper(&P, false) {}
+
+Error LLVMOutputStyle::dump() {
+  if (auto EC = dumpFileHeaders())
+    return EC;
+
+  if (auto EC = dumpStreamSummary())
+    return EC;
+
+  if (auto EC = dumpFreePageMap())
+    return EC;
+
+  if (auto EC = dumpStreamBlocks())
+    return EC;
+
+  if (auto EC = dumpStreamData())
+    return EC;
+
+  if (auto EC = dumpInfoStream())
+    return EC;
+
+  if (auto EC = dumpNamedStream())
+    return EC;
+
+  if (auto EC = dumpTpiStream(StreamTPI))
+    return EC;
+
+  if (auto EC = dumpTpiStream(StreamIPI))
+    return EC;
+
+  if (auto EC = dumpDbiStream())
+    return EC;
+
+  if (auto EC = dumpSectionContribs())
+    return EC;
+
+  if (auto EC = dumpSectionMap())
+    return EC;
+
+  if (auto EC = dumpPublicsStream())
+    return EC;
+
+  if (auto EC = dumpSectionHeaders())
+    return EC;
+
+  if (auto EC = dumpFpoStream())
+    return EC;
+
+  flush();
+
+  return Error::success();
+}
 
 Error LLVMOutputStyle::dumpFileHeaders() {
-  if (!opts::DumpHeaders)
+  if (!opts::raw::DumpHeaders)
     return Error::success();
 
   DictScope D(P, "FileHeaders");
   P.printNumber("BlockSize", File.getBlockSize());
-  P.printNumber("Unknown0", File.getUnknown0());
+  P.printNumber("FreeBlockMap", File.getFreeBlockMapBlock());
   P.printNumber("NumBlocks", File.getBlockCount());
   P.printNumber("NumDirectoryBytes", File.getNumDirectoryBytes());
   P.printNumber("Unknown1", File.getUnknown1());
   P.printNumber("BlockMapAddr", File.getBlockMapIndex());
   P.printNumber("NumDirectoryBlocks", File.getNumDirectoryBlocks());
-  P.printNumber("BlockMapOffset", File.getBlockMapOffset());
 
   // The directory is not contiguous.  Instead, the block map contains a
   // contiguous list of block numbers whose contents, when concatenated in
@@ -64,7 +158,7 @@ Error LLVMOutputStyle::dumpFileHeaders() {
 }
 
 Error LLVMOutputStyle::dumpStreamSummary() {
-  if (!opts::DumpStreamSummary)
+  if (!opts::raw::DumpStreamSummary)
     return Error::success();
 
   // It's OK if we fail to load some of these streams, we still attempt to print
@@ -185,8 +279,57 @@ Error LLVMOutputStyle::dumpStreamSummary() {
   return Error::success();
 }
 
+Error LLVMOutputStyle::dumpFreePageMap() {
+  if (!opts::raw::DumpPageStats)
+    return Error::success();
+
+  // Start with used pages instead of free pages because
+  // the number of free pages is far larger than used pages.
+  BitVector FPM = File.getMsfLayout().FreePageMap;
+
+  PageStats PS(FPM);
+
+  recordKnownUsedPage(PS, 0); // MSF Super Block
+
+  uint32_t BlocksPerSection = msf::getFpmIntervalLength(File.getMsfLayout());
+  uint32_t NumSections = msf::getNumFpmIntervals(File.getMsfLayout());
+  for (uint32_t I = 0; I < NumSections; ++I) {
+    uint32_t Fpm0 = 1 + BlocksPerSection * I;
+    // 2 Fpm blocks spaced at `getBlockSize()` block intervals
+    recordKnownUsedPage(PS, Fpm0);
+    recordKnownUsedPage(PS, Fpm0 + 1);
+  }
+
+  recordKnownUsedPage(PS, File.getBlockMapIndex()); // Stream Table
+
+  for (auto DB : File.getDirectoryBlockArray())
+    recordKnownUsedPage(PS, DB);
+
+  // Record pages used by streams. Note that pages for stream 0
+  // are considered being unused because that's what MSVC tools do.
+  // Stream 0 doesn't contain actual data, so it makes some sense,
+  // though it's a bit confusing to us.
+  for (auto &SE : File.getStreamMap().drop_front(1))
+    for (auto &S : SE)
+      recordKnownUsedPage(PS, S);
+
+  dumpBitVector("Msf Free Pages", FPM);
+  dumpBitVector("Orphaned Pages", PS.OrphanedPages);
+  dumpBitVector("Multiply Used Pages", PS.MultiUsePages);
+  dumpBitVector("Use After Free Pages", PS.UseAfterFreePages);
+  return Error::success();
+}
+
+void LLVMOutputStyle::dumpBitVector(StringRef Name, const BitVector &V) {
+  std::vector<uint32_t> Vec;
+  for (uint32_t I = 0, E = V.size(); I != E; ++I)
+    if (V[I])
+      Vec.push_back(I);
+  P.printList(Name, Vec);
+}
+
 Error LLVMOutputStyle::dumpStreamBlocks() {
-  if (!opts::DumpStreamBlocks)
+  if (!opts::raw::DumpStreamBlocks)
     return Error::success();
 
   ListScope L(P, "StreamBlocks");
@@ -202,7 +345,7 @@ Error LLVMOutputStyle::dumpStreamBlocks() {
 
 Error LLVMOutputStyle::dumpStreamData() {
   uint32_t StreamCount = File.getNumStreams();
-  StringRef DumpStreamStr = opts::DumpStreamDataIdx;
+  StringRef DumpStreamStr = opts::raw::DumpStreamDataIdx;
   uint32_t DumpStreamNum;
   if (DumpStreamStr.getAsInteger(/*Radix=*/0U, DumpStreamNum))
     return Error::success();
@@ -210,10 +353,9 @@ Error LLVMOutputStyle::dumpStreamData() {
   if (DumpStreamNum >= StreamCount)
     return make_error<RawError>(raw_error_code::no_stream);
 
-  auto S = MappedBlockStream::createIndexedStream(DumpStreamNum, File);
-  if (!S)
-    return S.takeError();
-  codeview::StreamReader R(**S);
+  auto S = MappedBlockStream::createIndexedStream(
+      File.getMsfLayout(), File.getMsfBuffer(), DumpStreamNum);
+  StreamReader R(*S);
   while (R.bytesRemaining() > 0) {
     ArrayRef<uint8_t> Data;
     uint32_t BytesToReadInBlock = std::min(
@@ -228,7 +370,7 @@ Error LLVMOutputStyle::dumpStreamData() {
 }
 
 Error LLVMOutputStyle::dumpInfoStream() {
-  if (!opts::DumpHeaders)
+  if (!opts::raw::DumpHeaders)
     return Error::success();
   auto IS = File.getPDBInfoStream();
   if (!IS)
@@ -243,29 +385,28 @@ Error LLVMOutputStyle::dumpInfoStream() {
 }
 
 Error LLVMOutputStyle::dumpNamedStream() {
-  if (opts::DumpStreamDataName.empty())
+  if (opts::raw::DumpStreamDataName.empty())
     return Error::success();
 
   auto IS = File.getPDBInfoStream();
   if (!IS)
     return IS.takeError();
 
-  uint32_t NameStreamIndex = IS->getNamedStreamIndex(opts::DumpStreamDataName);
+  uint32_t NameStreamIndex =
+      IS->getNamedStreamIndex(opts::raw::DumpStreamDataName);
   if (NameStreamIndex == 0 || NameStreamIndex >= File.getNumStreams())
     return make_error<RawError>(raw_error_code::no_stream);
 
   if (NameStreamIndex != 0) {
     std::string Name("Stream '");
-    Name += opts::DumpStreamDataName;
+    Name += opts::raw::DumpStreamDataName;
     Name += "'";
     DictScope D(P, Name);
     P.printNumber("Index", NameStreamIndex);
 
-    auto NameStream =
-        MappedBlockStream::createIndexedStream(NameStreamIndex, File);
-    if (!NameStream)
-      return NameStream.takeError();
-    codeview::StreamReader Reader(**NameStream);
+    auto NameStream = MappedBlockStream::createIndexedStream(
+        File.getMsfLayout(), File.getMsfBuffer(), NameStreamIndex);
+    StreamReader Reader(*NameStream);
 
     NameHashTable NameTable;
     if (auto EC = NameTable.load(Reader))
@@ -290,12 +431,11 @@ static void printTypeIndexOffset(raw_ostream &OS,
 }
 
 static void dumpTpiHash(ScopedPrinter &P, TpiStream &Tpi) {
-  if (!opts::DumpTpiHash)
+  if (!opts::raw::DumpTpiHash)
     return;
   DictScope DD(P, "Hash");
   P.printNumber("Number of Hash Buckets", Tpi.NumHashBuckets());
   P.printNumber("Hash Key Size", Tpi.getHashKeySize());
-  codeview::FixedStreamArray<support::ulittle32_t> S = Tpi.getHashValues();
   P.printList("Values", Tpi.getHashValues());
   P.printList("Type Index Offsets", Tpi.getTypeIndexOffsets(),
               printTypeIndexOffset);
@@ -311,17 +451,17 @@ Error LLVMOutputStyle::dumpTpiStream(uint32_t StreamIdx) {
   StringRef Label;
   StringRef VerLabel;
   if (StreamIdx == StreamTPI) {
-    DumpRecordBytes = opts::DumpTpiRecordBytes;
-    DumpRecords = opts::DumpTpiRecords;
+    DumpRecordBytes = opts::raw::DumpTpiRecordBytes;
+    DumpRecords = opts::raw::DumpTpiRecords;
     Label = "Type Info Stream (TPI)";
     VerLabel = "TPI Version";
   } else if (StreamIdx == StreamIPI) {
-    DumpRecordBytes = opts::DumpIpiRecordBytes;
-    DumpRecords = opts::DumpIpiRecords;
+    DumpRecordBytes = opts::raw::DumpIpiRecordBytes;
+    DumpRecords = opts::raw::DumpIpiRecords;
     Label = "Type Info Stream (IPI)";
     VerLabel = "IPI Version";
   }
-  if (!DumpRecordBytes && !DumpRecords && !opts::DumpModuleSyms)
+  if (!DumpRecordBytes && !DumpRecords && !opts::raw::DumpModuleSyms)
     return Error::success();
 
   auto Tpi = (StreamIdx == StreamTPI) ? File.getPDBTpiStream()
@@ -342,7 +482,7 @@ Error LLVMOutputStyle::dumpTpiStream(uint32_t StreamIdx) {
       DictScope DD(P, "");
 
       if (DumpRecords) {
-        if (auto EC = TD.dump(Type))
+        if (auto EC = Dumper.dump(Type))
           return EC;
       }
 
@@ -353,21 +493,21 @@ Error LLVMOutputStyle::dumpTpiStream(uint32_t StreamIdx) {
     if (HadError)
       return make_error<RawError>(raw_error_code::corrupt_file,
                                   "TPI stream contained corrupt record");
-  } else if (opts::DumpModuleSyms) {
+  } else if (opts::raw::DumpModuleSyms) {
     // Even if the user doesn't want to dump type records, we still need to
     // iterate them in order to build the list of types so that we can print
     // them when dumping module symbols. So when they want to dump symbols
     // but not types, use a null output stream.
-    ScopedPrinter *OldP = TD.getPrinter();
-    TD.setPrinter(nullptr);
+    ScopedPrinter *OldP = Dumper.getPrinter();
+    Dumper.setPrinter(nullptr);
 
     bool HadError = false;
     for (auto &Type : Tpi->types(&HadError)) {
-      if (auto EC = TD.dump(Type))
+      if (auto EC = Dumper.dump(Type))
         return EC;
     }
 
-    TD.setPrinter(OldP);
+    Dumper.setPrinter(OldP);
     dumpTpiHash(P, *Tpi);
     if (HadError)
       return make_error<RawError>(raw_error_code::corrupt_file,
@@ -378,9 +518,9 @@ Error LLVMOutputStyle::dumpTpiStream(uint32_t StreamIdx) {
 }
 
 Error LLVMOutputStyle::dumpDbiStream() {
-  bool DumpModules = opts::DumpModules || opts::DumpModuleSyms ||
-                     opts::DumpModuleFiles || opts::DumpLineInfo;
-  if (!opts::DumpHeaders && !DumpModules)
+  bool DumpModules = opts::raw::DumpModules || opts::raw::DumpModuleSyms ||
+                     opts::raw::DumpModuleFiles || opts::raw::DumpLineInfo;
+  if (!opts::raw::DumpHeaders && !DumpModules)
     return Error::success();
 
   auto DS = File.getPDBDbiStream();
@@ -424,7 +564,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
       P.printNumber("Symbol Byte Size", Modi.Info.getSymbolDebugInfoByteSize());
       P.printNumber("Type Server Index", Modi.Info.getTypeServerIndex());
       P.printBoolean("Has EC Info", Modi.Info.hasECInfo());
-      if (opts::DumpModuleFiles) {
+      if (opts::raw::DumpModuleFiles) {
         std::string FileListName =
             to_string(Modi.SourceFiles.size()) + " Contributing Source Files";
         ListScope LL(P, FileListName);
@@ -434,26 +574,26 @@ Error LLVMOutputStyle::dumpDbiStream() {
       bool HasModuleDI =
           (Modi.Info.getModuleStreamIndex() < File.getNumStreams());
       bool ShouldDumpSymbols =
-          (opts::DumpModuleSyms || opts::DumpSymRecordBytes);
-      if (HasModuleDI && (ShouldDumpSymbols || opts::DumpLineInfo)) {
+          (opts::raw::DumpModuleSyms || opts::raw::DumpSymRecordBytes);
+      if (HasModuleDI && (ShouldDumpSymbols || opts::raw::DumpLineInfo)) {
         auto ModStreamData = MappedBlockStream::createIndexedStream(
-            Modi.Info.getModuleStreamIndex(), File);
-        if (!ModStreamData)
-          return ModStreamData.takeError();
-        ModStream ModS(Modi.Info, std::move(*ModStreamData));
+            File.getMsfLayout(), File.getMsfBuffer(),
+            Modi.Info.getModuleStreamIndex());
+
+        ModStream ModS(Modi.Info, std::move(ModStreamData));
         if (auto EC = ModS.reload())
           return EC;
 
         if (ShouldDumpSymbols) {
           ListScope SS(P, "Symbols");
-          codeview::CVSymbolDumper SD(P, TD, nullptr, false);
+          codeview::CVSymbolDumper SD(P, Dumper, nullptr, false);
           bool HadError = false;
           for (const auto &S : ModS.symbols(&HadError)) {
             DictScope DD(P, "");
 
-            if (opts::DumpModuleSyms)
+            if (opts::raw::DumpModuleSyms)
               SD.dump(S);
-            if (opts::DumpSymRecordBytes)
+            if (opts::raw::DumpSymRecordBytes)
               P.printBinaryBlock("Bytes", S.Data);
           }
           if (HadError)
@@ -461,7 +601,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
                 raw_error_code::corrupt_file,
                 "DBI stream contained corrupt symbol record");
         }
-        if (opts::DumpLineInfo) {
+        if (opts::raw::DumpLineInfo) {
           ListScope SS(P, "LineInfo");
           bool HadError = false;
           // Define a locally scoped visitor to print the different
@@ -470,7 +610,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
           public:
             RecordVisitor(ScopedPrinter &P, PDBFile &F) : P(P), F(F) {}
             Error visitUnknown(ModuleSubstreamKind Kind,
-                               StreamRef Stream) override {
+                               ReadableStreamRef Stream) override {
               DictScope DD(P, "Unknown");
               ArrayRef<uint8_t> Data;
               StreamReader R(Stream);
@@ -483,7 +623,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
               return Error::success();
             }
             Error
-            visitFileChecksums(StreamRef Data,
+            visitFileChecksums(ReadableStreamRef Data,
                                const FileChecksumArray &Checksums) override {
               DictScope DD(P, "FileChecksums");
               for (const auto &C : Checksums) {
@@ -499,7 +639,8 @@ Error LLVMOutputStyle::dumpDbiStream() {
               return Error::success();
             }
 
-            Error visitLines(StreamRef Data, const LineSubstreamHeader *Header,
+            Error visitLines(ReadableStreamRef Data,
+                             const LineSubstreamHeader *Header,
                              const LineInfoArray &Lines) override {
               DictScope DD(P, "Lines");
               for (const auto &L : Lines) {
@@ -561,7 +702,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
 }
 
 Error LLVMOutputStyle::dumpSectionContribs() {
-  if (!opts::DumpSectionContribs)
+  if (!opts::raw::DumpSectionContribs)
     return Error::success();
 
   auto Dbi = File.getPDBDbiStream();
@@ -608,7 +749,7 @@ Error LLVMOutputStyle::dumpSectionContribs() {
 }
 
 Error LLVMOutputStyle::dumpSectionMap() {
-  if (!opts::DumpSectionMap)
+  if (!opts::raw::DumpSectionMap)
     return Error::success();
 
   auto Dbi = File.getPDBDbiStream();
@@ -633,7 +774,7 @@ Error LLVMOutputStyle::dumpSectionMap() {
 }
 
 Error LLVMOutputStyle::dumpPublicsStream() {
-  if (!opts::DumpPublics)
+  if (!opts::raw::DumpPublics)
     return Error::success();
 
   DictScope D(P, "Publics Stream");
@@ -655,13 +796,13 @@ Error LLVMOutputStyle::dumpPublicsStream() {
   P.printList("Section Offsets", Publics->getSectionOffsets(),
               printSectionOffset);
   ListScope L(P, "Symbols");
-  codeview::CVSymbolDumper SD(P, TD, nullptr, false);
+  codeview::CVSymbolDumper SD(P, Dumper, nullptr, false);
   bool HadError = false;
   for (auto S : Publics->getSymbols(&HadError)) {
     DictScope DD(P, "");
 
     SD.dump(S);
-    if (opts::DumpSymRecordBytes)
+    if (opts::raw::DumpSymRecordBytes)
       P.printBinaryBlock("Bytes", S.Data);
   }
   if (HadError)
@@ -673,7 +814,7 @@ Error LLVMOutputStyle::dumpPublicsStream() {
 }
 
 Error LLVMOutputStyle::dumpSectionHeaders() {
-  if (!opts::DumpSectionHeaders)
+  if (!opts::raw::DumpSectionHeaders)
     return Error::success();
 
   auto Dbi = File.getPDBDbiStream();
@@ -702,7 +843,7 @@ Error LLVMOutputStyle::dumpSectionHeaders() {
 }
 
 Error LLVMOutputStyle::dumpFpoStream() {
-  if (!opts::DumpFpo)
+  if (!opts::raw::DumpFpo)
     return Error::success();
 
   auto Dbi = File.getPDBDbiStream();
@@ -724,4 +865,5 @@ Error LLVMOutputStyle::dumpFpoStream() {
   }
   return Error::success();
 }
+
 void LLVMOutputStyle::flush() { P.flush(); }

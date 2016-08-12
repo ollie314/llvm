@@ -292,6 +292,8 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     return "readnone";
   if (hasAttribute(Attribute::ReadOnly))
     return "readonly";
+  if (hasAttribute(Attribute::WriteOnly))
+    return "writeonly";
   if (hasAttribute(Attribute::Returned))
     return "returned";
   if (hasAttribute(Attribute::ReturnsTwice))
@@ -516,6 +518,7 @@ uint64_t AttributeImpl::getAttrMask(Attribute::AttrKind Val) {
   case Attribute::InaccessibleMemOrArgMemOnly: return 1ULL << 50;
   case Attribute::SwiftSelf:       return 1ULL << 51;
   case Attribute::SwiftError:      return 1ULL << 52;
+  case Attribute::WriteOnly:       return 1ULL << 53;
   case Attribute::Dereferenceable:
     llvm_unreachable("dereferenceable attribute not supported in raw format");
     break;
@@ -718,10 +721,11 @@ AttributeSet AttributeSet::get(LLVMContext &C,
                            const std::pair<unsigned, Attribute> &RHS) {
                           return LHS.first < RHS.first;
                         }) && "Misordered Attributes list!");
-  assert(std::none_of(Attrs.begin(), Attrs.end(),
-                      [](const std::pair<unsigned, Attribute> &Pair) {
-                        return Pair.second.hasAttribute(Attribute::None);
-                      }) && "Pointless attribute!");
+  assert(none_of(Attrs,
+                 [](const std::pair<unsigned, Attribute> &Pair) {
+                   return Pair.second.hasAttribute(Attribute::None);
+                 }) &&
+         "Pointless attribute!");
 
   // Create a vector if (unsigned, AttributeSetNode*) pairs from the attributes
   // list.
@@ -735,8 +739,7 @@ AttributeSet AttributeSet::get(LLVMContext &C,
       ++I;
     }
 
-    AttrPairVec.push_back(std::make_pair(Index,
-                                         AttributeSetNode::get(C, AttrVec)));
+    AttrPairVec.emplace_back(Index, AttributeSetNode::get(C, AttrVec));
   }
 
   return getImpl(C, AttrPairVec);
@@ -788,13 +791,12 @@ AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
     default:
       Attr = Attribute::get(C, Kind);
     }
-    Attrs.push_back(std::make_pair(Index, Attr));
+    Attrs.emplace_back(Index, Attr);
   }
 
   // Add target-dependent (string) attributes.
   for (const auto &TDA : B.td_attrs())
-    Attrs.push_back(
-        std::make_pair(Index, Attribute::get(C, TDA.first, TDA.second)));
+    Attrs.emplace_back(Index, Attribute::get(C, TDA.first, TDA.second));
 
   return get(C, Attrs);
 }
@@ -803,7 +805,7 @@ AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
                                ArrayRef<Attribute::AttrKind> Kinds) {
   SmallVector<std::pair<unsigned, Attribute>, 8> Attrs;
   for (Attribute::AttrKind K : Kinds)
-    Attrs.push_back(std::make_pair(Index, Attribute::get(C, K)));
+    Attrs.emplace_back(Index, Attribute::get(C, K));
   return get(C, Attrs);
 }
 
@@ -811,7 +813,7 @@ AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
                                ArrayRef<StringRef> Kinds) {
   SmallVector<std::pair<unsigned, Attribute>, 8> Attrs;
   for (StringRef K : Kinds)
-    Attrs.push_back(std::make_pair(Index, Attribute::get(C, K)));
+    Attrs.emplace_back(Index, Attribute::get(C, K));
   return get(C, Attrs);
 }
 
@@ -1105,14 +1107,17 @@ bool AttributeSet::hasFnAttribute(Attribute::AttrKind Kind) const {
   return pImpl && pImpl->hasFnAttribute(Kind);
 }
 
-bool AttributeSet::hasAttrSomewhere(Attribute::AttrKind Attr) const {
+bool AttributeSet::hasAttrSomewhere(Attribute::AttrKind Attr,
+                                    unsigned *Index) const {
   if (!pImpl) return false;
 
   for (unsigned I = 0, E = pImpl->getNumSlots(); I != E; ++I)
     for (AttributeSetImpl::iterator II = pImpl->begin(I),
            IE = pImpl->end(I); II != IE; ++II)
-      if (II->hasAttribute(Attr))
+      if (II->hasAttribute(Attr)) {
+        if (Index) *Index = pImpl->getSlotIndex(I);
         return true;
+      }
 
   return false;
 }
@@ -1152,7 +1157,7 @@ uint64_t AttributeSet::getDereferenceableOrNullBytes(unsigned Index) const {
 std::pair<unsigned, Optional<unsigned>>
 AttributeSet::getAllocSizeArgs(unsigned Index) const {
   AttributeSetNode *ASN = getAttributes(Index);
-  return ASN ? ASN->getAllocSizeArgs() : std::make_pair(0, 0);
+  return ASN ? ASN->getAllocSizeArgs() : std::make_pair(0u, Optional<unsigned>(0u));
 }
 
 std::string AttributeSet::getAsString(unsigned Index, bool InAttrGrp) const {

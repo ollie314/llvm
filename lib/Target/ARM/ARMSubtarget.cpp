@@ -22,7 +22,6 @@
 #include "Thumb1FrameLowering.h"
 #include "Thumb1InstrInfo.h"
 #include "Thumb2InstrInfo.h"
-#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -200,6 +199,9 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
       (Options.UnsafeFPMath || isTargetDarwin()))
     UseNEONForSinglePrecisionFP = true;
 
+  if (isRWPI())
+    ReserveR9 = true;
+
   // FIXME: Teach TableGen to deal with these instead of doing it manually here.
   switch (ARMProcFamily) {
   case Others:
@@ -220,6 +222,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
   case CortexA15:
     MaxInterleaveFactor = 2;
     PreISelOperandLatencyAdjustment = 1;
+    PartialUpdateClearance = 12;
     break;
   case CortexA17:
   case CortexA32:
@@ -242,6 +245,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
     MaxInterleaveFactor = 2;
     LdStMultipleTiming = SingleIssuePlusExtras;
     PreISelOperandLatencyAdjustment = 1;
+    PartialUpdateClearance = 12;
     break;
   }
 }
@@ -260,17 +264,23 @@ bool ARMSubtarget::isAAPCS16_ABI() const {
   return TM.TargetABI == ARMBaseTargetMachine::ARM_ABI_AAPCS16;
 }
 
-/// true if the GV will be accessed via an indirect symbol.
-bool
-ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
-                                 Reloc::Model RelocM) const {
+bool ARMSubtarget::isROPI() const {
+  return TM.getRelocationModel() == Reloc::ROPI ||
+         TM.getRelocationModel() == Reloc::ROPI_RWPI;
+}
+bool ARMSubtarget::isRWPI() const {
+  return TM.getRelocationModel() == Reloc::RWPI ||
+         TM.getRelocationModel() == Reloc::ROPI_RWPI;
+}
+
+bool ARMSubtarget::isGVIndirectSymbol(const GlobalValue *GV) const {
   if (!TM.shouldAssumeDSOLocal(*GV->getParent(), GV))
     return true;
 
   // 32 bit macho has no relocation for a-b if a is undefined, even if b is in
   // the section that is being relocated. This means we have to use o load even
   // for GVs that are known to be local to the dso.
-  if (isTargetDarwin() && RelocM == Reloc::PIC_ &&
+  if (isTargetDarwin() && TM.isPositionIndependent() &&
       (GV->isDeclarationForLinker() || GV->hasCommonLinkage()))
     return true;
 

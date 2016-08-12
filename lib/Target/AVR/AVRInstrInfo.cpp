@@ -60,15 +60,15 @@ void AVRInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       .addReg(SrcReg, getKillRegState(KillSrc));
 }
 
-unsigned AVRInstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
+unsigned AVRInstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
                                            int &FrameIndex) const {
-  switch (MI->getOpcode()) {
+  switch (MI.getOpcode()) {
   case AVR::LDDRdPtrQ:
   case AVR::LDDWRdYQ: { //:FIXME: remove this once PR13375 gets fixed
-    if ((MI->getOperand(1).isFI()) && (MI->getOperand(2).isImm()) &&
-        (MI->getOperand(2).getImm() == 0)) {
-      FrameIndex = MI->getOperand(1).getIndex();
-      return MI->getOperand(0).getReg();
+    if (MI.getOperand(1).isFI() && MI.getOperand(2).isImm() &&
+        MI.getOperand(2).getImm() == 0) {
+      FrameIndex = MI.getOperand(1).getIndex();
+      return MI.getOperand(0).getReg();
     }
     break;
   }
@@ -79,15 +79,15 @@ unsigned AVRInstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
   return 0;
 }
 
-unsigned AVRInstrInfo::isStoreToStackSlot(const MachineInstr *MI,
+unsigned AVRInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
                                           int &FrameIndex) const {
-  switch (MI->getOpcode()) {
+  switch (MI.getOpcode()) {
   case AVR::STDPtrQRr:
   case AVR::STDWPtrQRr: {
-    if ((MI->getOperand(0).isFI()) && (MI->getOperand(1).isImm()) &&
-        (MI->getOperand(1).getImm() == 0)) {
-      FrameIndex = MI->getOperand(0).getIndex();
-      return MI->getOperand(2).getReg();
+    if (MI.getOperand(0).isFI() && MI.getOperand(1).isImm() &&
+        MI.getOperand(1).getImm() == 0) {
+      FrameIndex = MI.getOperand(0).getIndex();
+      return MI.getOperand(2).getReg();
     }
     break;
   }
@@ -111,7 +111,7 @@ void AVRInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
     DL = MI->getDebugLoc();
   }
 
-  const MachineFrameInfo &MFI = *MF.getFrameInfo();
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
 
   MachineMemOperand *MMO = MF.getMachineMemOperand(
       MachinePointerInfo::getFixedStack(MF, FrameIndex),
@@ -145,7 +145,7 @@ void AVRInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
   }
 
   MachineFunction &MF = *MBB.getParent();
-  const MachineFrameInfo &MFI = *MF.getFrameInfo();
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
 
   MachineMemOperand *MMO = MF.getMachineMemOperand(
       MachinePointerInfo::getFixedStack(MF, FrameIndex),
@@ -238,7 +238,7 @@ AVRCC::CondCodes AVRInstrInfo::getOppositeCondition(AVRCC::CondCodes CC) const {
   }
 }
 
-bool AVRInstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
+bool AVRInstrInfo::analyzeBranch(MachineBasicBlock &MBB,
                                  MachineBasicBlock *&TBB,
                                  MachineBasicBlock *&FBB,
                                  SmallVectorImpl<MachineOperand> &Cond,
@@ -439,7 +439,7 @@ bool AVRInstrInfo::ReverseBranchCondition(
   return false;
 }
 
-unsigned AVRInstrInfo::GetInstSizeInBytes(const MachineInstr *MI) const {
+unsigned AVRInstrInfo::getInstSizeInBytes(const MachineInstr *MI) const {
   unsigned Opcode = MI->getOpcode();
 
   switch (Opcode) {

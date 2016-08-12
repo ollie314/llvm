@@ -413,7 +413,7 @@ SDValue MSP430TargetLowering::LowerCCCArguments(
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
   MachineFunction &MF = DAG.getMachineFunction();
-  MachineFrameInfo *MFI = MF.getFrameInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
   MSP430MachineFunctionInfo *FuncInfo = MF.getInfo<MSP430MachineFunctionInfo>();
 
@@ -426,7 +426,7 @@ SDValue MSP430TargetLowering::LowerCCCArguments(
   // Create frame index for the start of the first vararg value
   if (isVarArg) {
     unsigned Offset = CCInfo.getNextStackOffset();
-    FuncInfo->setVarArgsFrameIndex(MFI->CreateFixedObject(1, Offset, true));
+    FuncInfo->setVarArgsFrameIndex(MFI.CreateFixedObject(1, Offset, true));
   }
 
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
@@ -471,8 +471,8 @@ SDValue MSP430TargetLowering::LowerCCCArguments(
       ISD::ArgFlagsTy Flags = Ins[i].Flags;
 
       if (Flags.isByVal()) {
-        int FI = MFI->CreateFixedObject(Flags.getByValSize(),
-                                        VA.getLocMemOffset(), true);
+        int FI = MFI.CreateFixedObject(Flags.getByValSize(),
+                                       VA.getLocMemOffset(), true);
         InVal = DAG.getFrameIndex(FI, getPointerTy(DAG.getDataLayout()));
       } else {
         // Load the argument to a virtual register
@@ -483,15 +483,14 @@ SDValue MSP430TargetLowering::LowerCCCArguments(
                 << "\n";
         }
         // Create the frame index object for this incoming parameter...
-        int FI = MFI->CreateFixedObject(ObjSize, VA.getLocMemOffset(), true);
+        int FI = MFI.CreateFixedObject(ObjSize, VA.getLocMemOffset(), true);
 
         // Create the SelectionDAG nodes corresponding to a load
         //from this parameter
         SDValue FIN = DAG.getFrameIndex(FI, MVT::i16);
         InVal = DAG.getLoad(
             VA.getLocVT(), dl, Chain, FIN,
-            MachinePointerInfo::getFixedStack(DAG.getMachineFunction(), FI),
-            false, false, false, 0);
+            MachinePointerInfo::getFixedStack(DAG.getMachineFunction(), FI));
       }
 
       InVals.push_back(InVal);
@@ -625,8 +624,7 @@ SDValue MSP430TargetLowering::LowerCCCCallTo(
                               MachinePointerInfo(),
                               MachinePointerInfo());
       } else {
-        MemOp = DAG.getStore(Chain, dl, Arg, PtrOff, MachinePointerInfo(),
-                             false, false, 0);
+        MemOp = DAG.getStore(Chain, dl, Arg, PtrOff, MachinePointerInfo());
       }
 
       MemOpChains.push_back(MemOp);
@@ -999,7 +997,7 @@ MSP430TargetLowering::getReturnAddressFrameIndex(SelectionDAG &DAG) const {
   if (ReturnAddrIndex == 0) {
     // Set up a frame object for the return address.
     uint64_t SlotSize = MF.getDataLayout().getPointerSize();
-    ReturnAddrIndex = MF.getFrameInfo()->CreateFixedObject(SlotSize, -SlotSize,
+    ReturnAddrIndex = MF.getFrameInfo().CreateFixedObject(SlotSize, -SlotSize,
                                                            true);
     FuncInfo->setRAIndex(ReturnAddrIndex);
   }
@@ -1009,8 +1007,8 @@ MSP430TargetLowering::getReturnAddressFrameIndex(SelectionDAG &DAG) const {
 
 SDValue MSP430TargetLowering::LowerRETURNADDR(SDValue Op,
                                               SelectionDAG &DAG) const {
-  MachineFrameInfo *MFI = DAG.getMachineFunction().getFrameInfo();
-  MFI->setReturnAddressIsTaken(true);
+  MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
+  MFI.setReturnAddressIsTaken(true);
 
   if (verifyReturnAddressArgumentIsConstant(Op, DAG))
     return SDValue();
@@ -1025,19 +1023,19 @@ SDValue MSP430TargetLowering::LowerRETURNADDR(SDValue Op,
         DAG.getConstant(DAG.getDataLayout().getPointerSize(), dl, MVT::i16);
     return DAG.getLoad(PtrVT, dl, DAG.getEntryNode(),
                        DAG.getNode(ISD::ADD, dl, PtrVT, FrameAddr, Offset),
-                       MachinePointerInfo(), false, false, false, 0);
+                       MachinePointerInfo());
   }
 
   // Just load the return address.
   SDValue RetAddrFI = getReturnAddressFrameIndex(DAG);
   return DAG.getLoad(PtrVT, dl, DAG.getEntryNode(), RetAddrFI,
-                     MachinePointerInfo(), false, false, false, 0);
+                     MachinePointerInfo());
 }
 
 SDValue MSP430TargetLowering::LowerFRAMEADDR(SDValue Op,
                                              SelectionDAG &DAG) const {
-  MachineFrameInfo *MFI = DAG.getMachineFunction().getFrameInfo();
-  MFI->setFrameAddressIsTaken(true);
+  MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
+  MFI.setFrameAddressIsTaken(true);
 
   EVT VT = Op.getValueType();
   SDLoc dl(Op);  // FIXME probably not meaningful
@@ -1046,8 +1044,7 @@ SDValue MSP430TargetLowering::LowerFRAMEADDR(SDValue Op,
                                          MSP430::FP, VT);
   while (Depth--)
     FrameAddr = DAG.getLoad(VT, dl, DAG.getEntryNode(), FrameAddr,
-                            MachinePointerInfo(),
-                            false, false, false, 0);
+                            MachinePointerInfo());
   return FrameAddr;
 }
 
@@ -1063,9 +1060,8 @@ SDValue MSP430TargetLowering::LowerVASTART(SDValue Op,
   const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
 
   // Create a store of the frame index to the location operand
-  return DAG.getStore(Op.getOperand(0), SDLoc(Op), FrameIndex,
-                      Op.getOperand(1), MachinePointerInfo(SV),
-                      false, false, 0);
+  return DAG.getStore(Op.getOperand(0), SDLoc(Op), FrameIndex, Op.getOperand(1),
+                      MachinePointerInfo(SV));
 }
 
 SDValue MSP430TargetLowering::LowerJumpTable(SDValue Op,
@@ -1166,17 +1162,17 @@ bool MSP430TargetLowering::isZExtFree(SDValue Val, EVT VT2) const {
 //  Other Lowering Code
 //===----------------------------------------------------------------------===//
 
-MachineBasicBlock*
-MSP430TargetLowering::EmitShiftInstr(MachineInstr *MI,
+MachineBasicBlock *
+MSP430TargetLowering::EmitShiftInstr(MachineInstr &MI,
                                      MachineBasicBlock *BB) const {
   MachineFunction *F = BB->getParent();
   MachineRegisterInfo &RI = F->getRegInfo();
-  DebugLoc dl = MI->getDebugLoc();
+  DebugLoc dl = MI.getDebugLoc();
   const TargetInstrInfo &TII = *F->getSubtarget().getInstrInfo();
 
   unsigned Opc;
   const TargetRegisterClass * RC;
-  switch (MI->getOpcode()) {
+  switch (MI.getOpcode()) {
   default: llvm_unreachable("Invalid shift opcode!");
   case MSP430::Shl8:
    Opc = MSP430::SHL8r1;
@@ -1230,9 +1226,9 @@ MSP430TargetLowering::EmitShiftInstr(MachineInstr *MI,
   unsigned ShiftAmtReg2 = RI.createVirtualRegister(&MSP430::GR8RegClass);
   unsigned ShiftReg = RI.createVirtualRegister(RC);
   unsigned ShiftReg2 = RI.createVirtualRegister(RC);
-  unsigned ShiftAmtSrcReg = MI->getOperand(2).getReg();
-  unsigned SrcReg = MI->getOperand(1).getReg();
-  unsigned DstReg = MI->getOperand(0).getReg();
+  unsigned ShiftAmtSrcReg = MI.getOperand(2).getReg();
+  unsigned SrcReg = MI.getOperand(1).getReg();
+  unsigned DstReg = MI.getOperand(0).getReg();
 
   // BB:
   // cmp 0, N
@@ -1268,14 +1264,14 @@ MSP430TargetLowering::EmitShiftInstr(MachineInstr *MI,
     .addReg(SrcReg).addMBB(BB)
     .addReg(ShiftReg2).addMBB(LoopBB);
 
-  MI->eraseFromParent();   // The pseudo instruction is gone now.
+  MI.eraseFromParent(); // The pseudo instruction is gone now.
   return RemBB;
 }
 
-MachineBasicBlock*
-MSP430TargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
+MachineBasicBlock *
+MSP430TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                   MachineBasicBlock *BB) const {
-  unsigned Opc = MI->getOpcode();
+  unsigned Opc = MI.getOpcode();
 
   if (Opc == MSP430::Shl8 || Opc == MSP430::Shl16 ||
       Opc == MSP430::Sra8 || Opc == MSP430::Sra16 ||
@@ -1283,7 +1279,7 @@ MSP430TargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
     return EmitShiftInstr(MI, BB);
 
   const TargetInstrInfo &TII = *BB->getParent()->getSubtarget().getInstrInfo();
-  DebugLoc dl = MI->getDebugLoc();
+  DebugLoc dl = MI.getDebugLoc();
 
   assert((Opc == MSP430::Select16 || Opc == MSP430::Select8) &&
          "Unexpected instr type to insert");
@@ -1317,8 +1313,8 @@ MSP430TargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
   BB->addSuccessor(copy1MBB);
 
   BuildMI(BB, dl, TII.get(MSP430::JCC))
-    .addMBB(copy1MBB)
-    .addImm(MI->getOperand(3).getImm());
+      .addMBB(copy1MBB)
+      .addImm(MI.getOperand(3).getImm());
 
   //  copy0MBB:
   //   %FalseValue = ...
@@ -1332,11 +1328,12 @@ MSP430TargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
   //   %Result = phi [ %FalseValue, copy0MBB ], [ %TrueValue, thisMBB ]
   //  ...
   BB = copy1MBB;
-  BuildMI(*BB, BB->begin(), dl, TII.get(MSP430::PHI),
-          MI->getOperand(0).getReg())
-    .addReg(MI->getOperand(2).getReg()).addMBB(copy0MBB)
-    .addReg(MI->getOperand(1).getReg()).addMBB(thisMBB);
+  BuildMI(*BB, BB->begin(), dl, TII.get(MSP430::PHI), MI.getOperand(0).getReg())
+      .addReg(MI.getOperand(2).getReg())
+      .addMBB(copy0MBB)
+      .addReg(MI.getOperand(1).getReg())
+      .addMBB(thisMBB);
 
-  MI->eraseFromParent();   // The pseudo instruction is gone now.
+  MI.eraseFromParent(); // The pseudo instruction is gone now.
   return BB;
 }

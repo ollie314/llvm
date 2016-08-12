@@ -124,10 +124,10 @@ bool Value::isUsedInBasicBlock(const BasicBlock *BB) const {
   const_user_iterator UI = user_begin(), UE = user_end();
   for (; BI != BE && UI != UE; ++BI, ++UI) {
     // Scan basic block: Check if this Value is used by the instruction at BI.
-    if (std::find(BI->op_begin(), BI->op_end(), this) != BI->op_end())
+    if (is_contained(BI->operands(), this))
       return true;
     // Scan use list: Check if the use at UI is in BB.
-    const Instruction *User = dyn_cast<Instruction>(*UI);
+    const auto *User = dyn_cast<Instruction>(*UI);
     if (User && User->getParent() == BB)
       return true;
   }
@@ -464,6 +464,12 @@ static Value *stripPointerCastsAndOffsets(Value *V) {
         return V;
       V = GA->getAliasee();
     } else {
+      if (auto CS = CallSite(V))
+        if (Value *RV = CS.getReturnedArgOperand()) {
+          V = RV;
+          continue;
+        }
+
       return V;
     }
     assert(V->getType()->isPointerTy() && "Unexpected operand type!");
@@ -513,6 +519,12 @@ Value *Value::stripAndAccumulateInBoundsConstantOffsets(const DataLayout &DL,
     } else if (GlobalAlias *GA = dyn_cast<GlobalAlias>(V)) {
       V = GA->getAliasee();
     } else {
+      if (auto CS = CallSite(V))
+        if (Value *RV = CS.getReturnedArgOperand()) {
+          V = RV;
+          continue;
+        }
+
       return V;
     }
     assert(V->getType()->isPointerTy() && "Unexpected operand type!");

@@ -91,8 +91,8 @@ void MappingTraits<MachOYAML::Object>::mapping(IO &IO,
   // For Fat files there will be a different tag so they can be differentiated.
   if (!IO.getContext()) {
     IO.setContext(&Object);
-    IO.mapTag("!mach-o", true);
   }
+  IO.mapTag("!mach-o", true);
   IO.mapRequired("FileHeader", Object.Header);
   IO.mapOptional("LoadCommands", Object.LoadCommands);
   IO.mapOptional("LinkEditData", Object.LinkEdit);
@@ -138,7 +138,8 @@ void MappingTraits<MachOYAML::LinkEditData>::mapping(
   IO.mapOptional("BindOpcodes", LinkEditData.BindOpcodes);
   IO.mapOptional("WeakBindOpcodes", LinkEditData.WeakBindOpcodes);
   IO.mapOptional("LazyBindOpcodes", LinkEditData.LazyBindOpcodes);
-  IO.mapOptional("ExportTrie", LinkEditData.ExportTrie);
+  if(LinkEditData.ExportTrie.Children.size() > 0 || !IO.outputting())
+    IO.mapOptional("ExportTrie", LinkEditData.ExportTrie);
   IO.mapOptional("NameList", LinkEditData.NameList);
   IO.mapOptional("StringTable", LinkEditData.StringTable);
 }

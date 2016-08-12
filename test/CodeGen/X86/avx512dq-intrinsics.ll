@@ -474,6 +474,7 @@ define i16@test_int_x86_avx512_mask_fpclass_ps_512(<16 x float> %x0, i16 %x1) {
 ; CHECK-NEXT:    vfpclassps $4, %zmm0, %k0
 ; CHECK-NEXT:    kmovw %k0, %eax
 ; CHECK-NEXT:    addl %ecx, %eax
+; CHECK-NEXT:    ## kill: %AX<def> %AX<kill> %EAX<kill>
 ; CHECK-NEXT:    retq
     %res = call i16 @llvm.x86.avx512.mask.fpclass.ps.512(<16 x float> %x0, i32 4, i16 %x1)
     %res1 = call i16 @llvm.x86.avx512.mask.fpclass.ps.512(<16 x float> %x0, i32 4, i16 -1)
@@ -490,7 +491,6 @@ define i8 @test_int_x86_avx512_mask_fpclass_sd(<2 x double> %x0, i8 %x1) {
 ; CHECK-NEXT:    kmovw %edi, %k1
 ; CHECK-NEXT:    vfpclasssd $2, %xmm0, %k0 {%k1}
 ; CHECK-NEXT:    kmovw %k0, %eax
-; CHECK-NEXT:    andl $1, %eax
 ; CHECK-NEXT:    testb %al, %al
 ; CHECK-NEXT:    je LBB28_2
 ; CHECK-NEXT:  ## BB#1:
@@ -498,13 +498,13 @@ define i8 @test_int_x86_avx512_mask_fpclass_sd(<2 x double> %x0, i8 %x1) {
 ; CHECK-NEXT:  LBB28_2:
 ; CHECK-NEXT:    vfpclasssd $4, %xmm0, %k0
 ; CHECK-NEXT:    kmovw %k0, %ecx
-; CHECK-NEXT:    andl $1, %ecx
 ; CHECK-NEXT:    testb %cl, %cl
 ; CHECK-NEXT:    je LBB28_4
 ; CHECK-NEXT:  ## BB#3:
 ; CHECK-NEXT:    movb $-1, %cl
 ; CHECK-NEXT:  LBB28_4:
 ; CHECK-NEXT:    addb %cl, %al
+; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %AX<kill>
 ; CHECK-NEXT:    retq
   %res = call i8 @llvm.x86.avx512.mask.fpclass.sd(<2 x double> %x0, i32 2, i8 %x1)
   %res1 = call i8 @llvm.x86.avx512.mask.fpclass.sd(<2 x double> %x0, i32 4, i8 -1)
@@ -521,7 +521,6 @@ define i8 @test_int_x86_avx512_mask_fpclass_ss(<4 x float> %x0, i8 %x1) {
 ; CHECK-NEXT:    kmovw %edi, %k1
 ; CHECK-NEXT:    vfpclassss $4, %xmm0, %k0 {%k1}
 ; CHECK-NEXT:    kmovw %k0, %eax
-; CHECK-NEXT:    andl $1, %eax
 ; CHECK-NEXT:    testb %al, %al
 ; CHECK-NEXT:    je LBB29_2
 ; CHECK-NEXT:  ## BB#1:
@@ -529,13 +528,13 @@ define i8 @test_int_x86_avx512_mask_fpclass_ss(<4 x float> %x0, i8 %x1) {
 ; CHECK-NEXT:  LBB29_2:
 ; CHECK-NEXT:    vfpclassss $4, %xmm0, %k0
 ; CHECK-NEXT:    kmovw %k0, %ecx
-; CHECK-NEXT:    andl $1, %ecx
 ; CHECK-NEXT:    testb %cl, %cl
 ; CHECK-NEXT:    je LBB29_4
 ; CHECK-NEXT:  ## BB#3:
 ; CHECK-NEXT:    movb $-1, %cl
 ; CHECK-NEXT:  LBB29_4:
 ; CHECK-NEXT:    addb %cl, %al
+; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %AX<kill>
 ; CHECK-NEXT:    retq
   %res = call i8 @llvm.x86.avx512.mask.fpclass.ss(<4 x float> %x0, i32 4, i8 %x1)
   %res1 = call i8 @llvm.x86.avx512.mask.fpclass.ss(<4 x float> %x0, i32 4, i8 -1)
@@ -636,9 +635,10 @@ declare <16 x float> @llvm.x86.avx512.mask.broadcastf32x8.512(<8 x float>, <16 x
 define <16 x float>@test_int_x86_avx512_mask_broadcastf32x8_512(<8 x float> %x0, <16 x float> %x2, i16 %mask) {
 ; CHECK-LABEL: test_int_x86_avx512_mask_broadcastf32x8_512:
 ; CHECK:       ## BB#0:
+; CHECK-NEXT:    ## kill: %YMM0<def> %YMM0<kill> %ZMM0<def>
 ; CHECK-NEXT:    kmovw %edi, %k1
-; CHECK-NEXT:    vshuff32x4 {{.*#+}} zmm2 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
-; CHECK-NEXT:    vshuff32x4 {{.*#+}} zmm1 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
+; CHECK-NEXT:    vshuff32x4 {{.*#+}} zmm2 {%k1} {z} = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
+; CHECK-NEXT:    vshuff32x4 {{.*#+}} zmm1 {%k1} = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
 ; CHECK-NEXT:    vshuff32x4 {{.*#+}} zmm0 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
 ; CHECK-NEXT:    vaddps %zmm1, %zmm0, %zmm0
 ; CHECK-NEXT:    vaddps %zmm0, %zmm2, %zmm0
@@ -657,9 +657,10 @@ declare <8 x double> @llvm.x86.avx512.mask.broadcastf64x2.512(<2 x double>, <8 x
 define <8 x double>@test_int_x86_avx512_mask_broadcastf64x2_512(<2 x double> %x0, <8 x double> %x2, i8 %mask) {
 ; CHECK-LABEL: test_int_x86_avx512_mask_broadcastf64x2_512:
 ; CHECK:       ## BB#0:
+; CHECK-NEXT:    ## kill: %XMM0<def> %XMM0<kill> %ZMM0<def>
 ; CHECK-NEXT:    kmovb %edi, %k1
-; CHECK-NEXT:    vshuff64x2 {{.*#+}} zmm2 = zmm0[0,1,0,1,0,1,0,1]
-; CHECK-NEXT:    vshuff64x2 {{.*#+}} zmm1 = zmm0[0,1,0,1,0,1,0,1]
+; CHECK-NEXT:    vshuff64x2 {{.*#+}} zmm2 {%k1} {z} = zmm0[0,1,0,1,0,1,0,1]
+; CHECK-NEXT:    vshuff64x2 {{.*#+}} zmm1 {%k1} = zmm0[0,1,0,1,0,1,0,1]
 ; CHECK-NEXT:    vshuff64x2 {{.*#+}} zmm0 = zmm0[0,1,0,1,0,1,0,1]
 ; CHECK-NEXT:    vaddpd %zmm1, %zmm0, %zmm0
 ; CHECK-NEXT:    vaddpd %zmm0, %zmm2, %zmm0
@@ -678,9 +679,10 @@ declare <16 x i32> @llvm.x86.avx512.mask.broadcasti32x8.512(<8 x i32>, <16 x i32
 define <16 x i32>@test_int_x86_avx512_mask_broadcasti32x8_512(<8 x i32> %x0, <16 x i32> %x2, i16 %mask) {
 ; CHECK-LABEL: test_int_x86_avx512_mask_broadcasti32x8_512:
 ; CHECK:       ## BB#0:
+; CHECK-NEXT:    ## kill: %YMM0<def> %YMM0<kill> %ZMM0<def>
 ; CHECK-NEXT:    kmovw %edi, %k1
-; CHECK-NEXT:    vshufi32x4 {{.*#+}} zmm2 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
-; CHECK-NEXT:    vshufi32x4 {{.*#+}} zmm1 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
+; CHECK-NEXT:    vshufi32x4 {{.*#+}} zmm2 {%k1} {z} = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
+; CHECK-NEXT:    vshufi32x4 {{.*#+}} zmm1 {%k1} = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
 ; CHECK-NEXT:    vshufi32x4 {{.*#+}} zmm0 = zmm0[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7]
 ; CHECK-NEXT:    vpaddd %zmm1, %zmm0, %zmm0
 ; CHECK-NEXT:    vpaddd %zmm0, %zmm2, %zmm0
@@ -699,9 +701,10 @@ declare <8 x i64> @llvm.x86.avx512.mask.broadcasti64x2.512(<2 x i64>, <8 x i64>,
 define <8 x i64>@test_int_x86_avx512_mask_broadcasti64x2_512(<2 x i64> %x0, <8 x i64> %x2, i8 %mask) {
 ; CHECK-LABEL: test_int_x86_avx512_mask_broadcasti64x2_512:
 ; CHECK:       ## BB#0:
+; CHECK-NEXT:    ## kill: %XMM0<def> %XMM0<kill> %ZMM0<def>
 ; CHECK-NEXT:    kmovb %edi, %k1
-; CHECK-NEXT:    vshufi64x2 {{.*#+}} zmm2 = zmm0[0,1,0,1,0,1,0,1]
-; CHECK-NEXT:    vshufi64x2 {{.*#+}} zmm1 = zmm0[0,1,0,1,0,1,0,1]
+; CHECK-NEXT:    vshufi64x2 {{.*#+}} zmm2 {%k1} {z} = zmm0[0,1,0,1,0,1,0,1]
+; CHECK-NEXT:    vshufi64x2 {{.*#+}} zmm1 {%k1} = zmm0[0,1,0,1,0,1,0,1]
 ; CHECK-NEXT:    vshufi64x2 {{.*#+}} zmm0 = zmm0[0,1,0,1,0,1,0,1]
 ; CHECK-NEXT:    vpaddq %zmm1, %zmm0, %zmm0
 ; CHECK-NEXT:    vpaddq %zmm0, %zmm2, %zmm0

@@ -406,7 +406,7 @@ static bool isSchedBoundary(MachineBasicBlock::iterator MI,
                             MachineBasicBlock *MBB,
                             MachineFunction *MF,
                             const TargetInstrInfo *TII) {
-  return MI->isCall() || TII->isSchedulingBoundary(MI, MBB, *MF);
+  return MI->isCall() || TII->isSchedulingBoundary(*MI, MBB, *MF);
 }
 
 /// Main driver for both MachineScheduler and PostMachineScheduler.
@@ -458,9 +458,10 @@ void MachineSchedulerBase::scheduleRegions(ScheduleDAGInstrs &Scheduler,
       unsigned NumRegionInstrs = 0;
       MachineBasicBlock::iterator I = RegionEnd;
       for (;I != MBB->begin(); --I) {
-        if (isSchedBoundary(&*std::prev(I), &*MBB, MF, TII))
+        MachineInstr &MI = *std::prev(I);
+        if (isSchedBoundary(&MI, &*MBB, MF, TII))
           break;
-        if (!I->isDebugValue())
+        if (!MI.isDebugValue())
           ++NumRegionInstrs;
       }
       // Notify the scheduler of the region, even if we may skip scheduling
@@ -1402,7 +1403,7 @@ void BaseMemOpClusterMutation::clusterNeighboringMemOps(
     SUnit *SU = MemOps[Idx];
     unsigned BaseReg;
     int64_t Offset;
-    if (TII->getMemOpBaseRegImmOfs(SU->getInstr(), BaseReg, Offset, TRI))
+    if (TII->getMemOpBaseRegImmOfs(*SU->getInstr(), BaseReg, Offset, TRI))
       MemOpRecords.push_back(MemOpInfo(SU, BaseReg, Offset));
   }
   if (MemOpRecords.size() < 2)
@@ -1418,8 +1419,9 @@ void BaseMemOpClusterMutation::clusterNeighboringMemOps(
 
     SUnit *SUa = MemOpRecords[Idx].SU;
     SUnit *SUb = MemOpRecords[Idx+1].SU;
-    if (TII->shouldClusterMemOps(SUa->getInstr(), SUb->getInstr(), ClusterLength)
-        && DAG->addEdge(SUb, SDep(SUa, SDep::Cluster))) {
+    if (TII->shouldClusterMemOps(*SUa->getInstr(), *SUb->getInstr(),
+                                 ClusterLength) &&
+        DAG->addEdge(SUb, SDep(SUa, SDep::Cluster))) {
       DEBUG(dbgs() << "Cluster ld/st SU(" << SUa->NodeNum << ") - SU("
             << SUb->NodeNum << ")\n");
       // Copy successor edges from SUa to SUb. Interleaving computation
@@ -1529,7 +1531,7 @@ void MacroFusion::apply(ScheduleDAGInstrs *DAGInstrs) {
     if (!HasDataDep(TRI, *Branch, *Pred))
       continue;
 
-    if (!TII.shouldScheduleAdjacent(Pred, Branch))
+    if (!TII.shouldScheduleAdjacent(*Pred, *Branch))
       continue;
 
     // Create a single weak edge from SU to ExitSU. The only effect is to cause
@@ -2586,8 +2588,7 @@ void GenericScheduler::initPolicy(MachineBasicBlock::iterator Begin,
   RegionPolicy.OnlyBottomUp = true;
 
   // Allow the subtarget to override default policy.
-  MF.getSubtarget().overrideSchedPolicy(RegionPolicy, Begin, End,
-                                        NumRegionInstrs);
+  MF.getSubtarget().overrideSchedPolicy(RegionPolicy, NumRegionInstrs);
 
   // After subtarget overrides, apply command line options.
   if (!EnableRegPressure)

@@ -43,21 +43,16 @@
 
 #include "llvm/ADT/Optional.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
-#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
-#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
-#include "llvm/IR/ValueHandle.h"
-#include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -65,8 +60,7 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
-#include "llvm/Transforms/Utils/SimplifyIndVar.h"
-#include "llvm/Transforms/Utils/UnrollLoop.h"
+#include "llvm/Transforms/Utils/LoopSimplify.h"
 
 using namespace llvm;
 
@@ -81,6 +75,9 @@ static cl::opt<bool> PrintRangeChecks("irce-print-range-checks", cl::Hidden,
 
 static cl::opt<int> MaxExitProbReciprocal("irce-max-exit-prob-reciprocal",
                                           cl::Hidden, cl::init(10));
+
+static cl::opt<bool> SkipProfitabilityChecks("irce-skip-profitability-checks",
+                                             cl::Hidden, cl::init(false));
 
 #define DEBUG_TYPE "irce"
 
@@ -392,7 +389,8 @@ void InductiveRangeCheck::extractRangeChecksFromBranch(
 
   BranchProbability LikelyTaken(15, 16);
 
-  if (BPI.getEdgeProbability(BI->getParent(), (unsigned)0) < LikelyTaken)
+  if (!SkipProfitabilityChecks &&
+      BPI.getEdgeProbability(BI->getParent(), (unsigned)0) < LikelyTaken)
     return;
 
   SmallPtrSet<Value *, 8> Visited;
@@ -566,10 +564,11 @@ class LoopConstrainer {
   Function &F;
   LLVMContext &Ctx;
   ScalarEvolution &SE;
+  DominatorTree &DT;
 
   // Information about the original loop we started out with.
   Loop &OriginalLoop;
-  LoopInfo &OriginalLoopInfo;
+  LoopInfo &LI;
   const SCEV *LatchTakenCount;
   BasicBlock *OriginalPreheader;
 
@@ -586,9 +585,10 @@ class LoopConstrainer {
 
 public:
   LoopConstrainer(Loop &L, LoopInfo &LI, const LoopStructure &LS,
-                  ScalarEvolution &SE, InductiveRangeCheck::Range R)
+                  ScalarEvolution &SE, DominatorTree &DT,
+                  InductiveRangeCheck::Range R)
       : F(*L.getHeader()->getParent()), Ctx(L.getHeader()->getContext()),
-        SE(SE), OriginalLoop(L), OriginalLoopInfo(LI), LatchTakenCount(nullptr),
+        SE(SE), DT(DT), OriginalLoop(L), LI(LI), LatchTakenCount(nullptr),
         OriginalPreheader(nullptr), MainLoopPreheader(nullptr), Range(R),
         MainLoopStructure(LS) {}
 
@@ -648,7 +648,8 @@ LoopStructure::parseLoopStructure(ScalarEvolution &SE, BranchProbabilityInfo &BP
   BranchProbability ExitProbability =
     BPI.getEdgeProbability(LatchBr->getParent(), LatchBrExitIdx);
 
-  if (ExitProbability > BranchProbability(1, MaxExitProbReciprocal)) {
+  if (!SkipProfitabilityChecks &&
+      ExitProbability > BranchProbability(1, MaxExitProbReciprocal)) {
     FailureReason = "short running loop, not profitable";
     return None;
   }
@@ -1142,7 +1143,7 @@ void LoopConstrainer::addToParentLoopIfNeeded(ArrayRef<BasicBlock *> BBs) {
     return;
 
   for (BasicBlock *BB : BBs)
-    ParentLoop->addBasicBlockToLoop(BB, OriginalLoopInfo);
+    ParentLoop->addBasicBlockToLoop(BB, LI);
 }
 
 bool LoopConstrainer::run() {
@@ -1268,6 +1269,10 @@ bool LoopConstrainer::run() {
   addToParentLoopIfNeeded(makeArrayRef(std::begin(NewBlocks), NewBlocksEnd));
   addToParentLoopIfNeeded(PreLoop.Blocks);
   addToParentLoopIfNeeded(PostLoop.Blocks);
+
+  DT.recalculate(F);
+  formLCSSARecursively(OriginalLoop, DT, &LI, &SE);
+  simplifyLoop(&OriginalLoop, &DT, &LI, &SE, nullptr, true);
 
   return true;
 }
@@ -1439,8 +1444,9 @@ bool InductiveRangeCheckElimination::runOnLoop(Loop *L, LPPassManager &LPM) {
   if (!SafeIterRange.hasValue())
     return false;
 
+  auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LoopConstrainer LC(*L, getAnalysis<LoopInfoWrapperPass>().getLoopInfo(), LS,
-                     SE, SafeIterRange.getValue());
+                     SE, DT, SafeIterRange.getValue());
   bool Changed = LC.run();
 
   if (Changed) {

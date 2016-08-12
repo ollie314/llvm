@@ -12,6 +12,8 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/DebugInfo/CodeView/CodeView.h"
+#include "llvm/DebugInfo/CodeView/CVRecord.h"
+#include "llvm/DebugInfo/CodeView/TypeRecord.h"
 #include "llvm/Support/Error.h"
 
 namespace llvm {
@@ -39,16 +41,11 @@ public:
     return Error::success();
   }
 
-  virtual Error visitFieldListBegin(const CVRecord<TypeLeafKind> &Record) {
-    return Error::success();
-  }
-
-  virtual Error visitFieldListEnd(const CVRecord<TypeLeafKind> &Record) {
-    return Error::success();
-  }
-
 #define TYPE_RECORD(EnumName, EnumVal, Name)                                   \
-  virtual Error visit##Name(Name##Record &Record) { return Error::success(); }
+  virtual Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,            \
+                                 Name##Record &Record) {                       \
+    return Error::success();                                                   \
+  }
 #define MEMBER_RECORD(EnumName, EnumVal, Name)                                 \
   TYPE_RECORD(EnumName, EnumVal, Name)
 #define TYPE_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)

@@ -20,6 +20,9 @@
 using namespace llvm;
 
 namespace llvm {
+namespace object {
+class ELFObjectFileBase;
+}
 
 class RuntimeDyldELF : public RuntimeDyldImpl {
 
@@ -156,7 +159,7 @@ class RuntimeDyldELF : public RuntimeDyldImpl {
 
 public:
   RuntimeDyldELF(RuntimeDyld::MemoryManager &MemMgr,
-                 RuntimeDyld::SymbolResolver &Resolver);
+                 JITSymbolResolver &Resolver);
   ~RuntimeDyldELF() override;
 
   std::unique_ptr<RuntimeDyld::LoadedObjectInfo>

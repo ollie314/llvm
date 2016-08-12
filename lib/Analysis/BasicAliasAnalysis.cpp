@@ -376,6 +376,12 @@ bool BasicAAResult::DecomposeGEPExpression(const Value *V,
 
     const GEPOperator *GEPOp = dyn_cast<GEPOperator>(Op);
     if (!GEPOp) {
+      if (auto CS = ImmutableCallSite(V))
+        if (const Value *RV = CS.getReturnedArgOperand()) {
+          V = RV;
+          continue;
+        }
+
       // If it's not a GEP, hand it off to SimplifyInstruction to see if it
       // can come up with something. This matches what GetUnderlyingObject does.
       if (const Instruction *I = dyn_cast<Instruction>(V))
@@ -563,6 +569,8 @@ FunctionModRefBehavior BasicAAResult::getModRefBehavior(ImmutableCallSite CS) {
   // than that.
   if (CS.onlyReadsMemory())
     Min = FMRB_OnlyReadsMemory;
+  else if (CS.doesNotReadMemory())
+    Min = FMRB_DoesNotReadMemory;
 
   if (CS.onlyAccessesArgMemory())
     Min = FunctionModRefBehavior(Min & FMRB_OnlyAccessesArgumentPointees);
@@ -590,6 +598,8 @@ FunctionModRefBehavior BasicAAResult::getModRefBehavior(const Function *F) {
   // If the function declares it only reads memory, go with that.
   if (F->onlyReadsMemory())
     Min = FMRB_OnlyReadsMemory;
+  else if (F->doesNotReadMemory())
+    Min = FMRB_DoesNotReadMemory;
 
   if (F->onlyAccessesArgMemory())
     Min = FunctionModRefBehavior(Min & FMRB_OnlyAccessesArgumentPointees);
@@ -597,32 +607,18 @@ FunctionModRefBehavior BasicAAResult::getModRefBehavior(const Function *F) {
   return Min;
 }
 
-/// Returns true if this is a writeonly (i.e Mod only) parameter.  Currently,
-/// we don't have a writeonly attribute, so this only knows about builtin
-/// intrinsics and target library functions.  We could consider adding a
-/// writeonly attribute in the future and moving all of these facts to either
-/// Intrinsics.td or InferFunctionAttr.cpp
+/// Returns true if this is a writeonly (i.e Mod only) parameter.
 static bool isWriteOnlyParam(ImmutableCallSite CS, unsigned ArgIdx,
                              const TargetLibraryInfo &TLI) {
-  if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(CS.getInstruction()))
-    switch (II->getIntrinsicID()) {
-    default:
-      break;
-    case Intrinsic::memset:
-    case Intrinsic::memcpy:
-    case Intrinsic::memmove:
-      // We don't currently have a writeonly attribute.  All other properties
-      // of these intrinsics are nicely described via attributes in
-      // Intrinsics.td and handled generically.
-      if (ArgIdx == 0)
-        return true;
-    }
+  if (CS.paramHasAttr(ArgIdx + 1, Attribute::WriteOnly))
+    return true;
 
   // We can bound the aliasing properties of memset_pattern16 just as we can
   // for memcpy/memset.  This is particularly important because the
   // LoopIdiomRecognizer likes to turn loops into calls to memset_pattern16
-  // whenever possible.  Note that all but the missing writeonly attribute are
-  // handled via InferFunctionAttr.
+  // whenever possible.
+  // FIXME Consider handling this in InferFunctionAttr.cpp together with other
+  // attributes.
   LibFunc::Func F;
   if (CS.getCalledFunction() && TLI.getLibFunc(*CS.getCalledFunction(), F) &&
       F == LibFunc::memset_pattern16 && TLI.has(F))
@@ -639,8 +635,7 @@ static bool isWriteOnlyParam(ImmutableCallSite CS, unsigned ArgIdx,
 ModRefInfo BasicAAResult::getArgModRefInfo(ImmutableCallSite CS,
                                            unsigned ArgIdx) {
 
-  // Emulate the missing writeonly attribute by checking for known builtin
-  // intrinsics and target library functions.
+  // Checking for known builtin intrinsics and target library functions.
   if (isWriteOnlyParam(CS, ArgIdx, TLI))
     return MRI_Mod;
 
@@ -786,6 +781,32 @@ ModRefInfo BasicAAResult::getModRefInfo(ImmutableCallSite CS,
   if (isIntrinsicCall(CS, Intrinsic::experimental_guard))
     return MRI_Ref;
 
+  // Like assumes, invariant.start intrinsics were also marked as arbitrarily
+  // writing so that proper control dependencies are maintained but they never
+  // mod any particular memory location visible to the IR.
+  // *Unlike* assumes (which are now modeled as NoModRef), invariant.start
+  // intrinsic is now modeled as reading memory. This prevents hoisting the
+  // invariant.start intrinsic over stores. Consider:
+  // *ptr = 40;
+  // *ptr = 50;
+  // invariant_start(ptr)
+  // int val = *ptr;
+  // print(val);
+  //
+  // This cannot be transformed to:
+  //
+  // *ptr = 40;
+  // invariant_start(ptr)
+  // *ptr = 50;
+  // int val = *ptr;
+  // print(val);
+  //
+  // The transformation will cause the second store to be ignored (based on
+  // rules of invariant.start)  and print 40, while the first program always
+  // prints 50.
+  if (isIntrinsicCall(CS, Intrinsic::invariant_start))
+    return MRI_Ref;
+
   // The AAResultBase base class has some smarts, lets use them.
   return AAResultBase::getModRefInfo(CS, Loc);
 }
@@ -828,7 +849,10 @@ static AliasResult aliasSameBasePointerGEPs(const GEPOperator *GEP1,
                                             uint64_t V2Size,
                                             const DataLayout &DL) {
 
-  assert(GEP1->getPointerOperand() == GEP2->getPointerOperand() &&
+  assert(GEP1->getPointerOperand()->stripPointerCasts() ==
+         GEP2->getPointerOperand()->stripPointerCasts() &&
+         GEP1->getPointerOperand()->getType() ==
+         GEP2->getPointerOperand()->getType() &&
          "Expected GEPs with the same pointer operand");
 
   // Try to determine whether GEP1 and GEP2 index through arrays, into structs,
@@ -1086,7 +1110,10 @@ AliasResult BasicAAResult::aliasGEP(const GEPOperator *GEP1, uint64_t V1Size,
     // If we know the two GEPs are based off of the exact same pointer (and not
     // just the same underlying object), see if that tells us anything about
     // the resulting pointers.
-    if (GEP1->getPointerOperand() == GEP2->getPointerOperand()) {
+    if (GEP1->getPointerOperand()->stripPointerCasts() ==
+        GEP2->getPointerOperand()->stripPointerCasts() &&
+        GEP1->getPointerOperand()->getType() ==
+        GEP2->getPointerOperand()->getType()) {
       AliasResult R = aliasSameBasePointerGEPs(GEP1, V1Size, GEP2, V2Size, DL);
       // If we couldn't find anything interesting, don't abandon just yet.
       if (R != MayAlias)
@@ -1668,7 +1695,7 @@ bool BasicAAResult::constantOffsetHeuristic(
 
 char BasicAA::PassID;
 
-BasicAAResult BasicAA::run(Function &F, AnalysisManager<Function> &AM) {
+BasicAAResult BasicAA::run(Function &F, FunctionAnalysisManager &AM) {
   return BasicAAResult(F.getParent()->getDataLayout(),
                        AM.getResult<TargetLibraryAnalysis>(F),
                        AM.getResult<AssumptionAnalysis>(F),

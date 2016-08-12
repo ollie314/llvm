@@ -725,16 +725,27 @@ void ARMAsmPrinter::emitAttributes() {
       ATS.emitFPU(ARM::FK_VFPV2);
   }
 
+  // RW data addressing.
   if (isPositionIndependent()) {
-    // PIC specific attributes.
     ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_RW_data,
                       ARMBuildAttrs::AddressRWPCRel);
+  } else if (STI.isRWPI()) {
+    // RWPI specific attributes.
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_RW_data,
+                      ARMBuildAttrs::AddressRWSBRel);
+  }
+
+  // RO data addressing.
+  if (isPositionIndependent() || STI.isROPI()) {
     ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_RO_data,
                       ARMBuildAttrs::AddressROPCRel);
+  }
+
+  // GOT use.
+  if (isPositionIndependent()) {
     ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_GOT_use,
                       ARMBuildAttrs::AddressGOT);
   } else {
-    // Allow direct addressing of imported data for all other relocation models.
     ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_GOT_use,
                       ARMBuildAttrs::AddressDirect);
   }
@@ -858,14 +869,16 @@ void ARMAsmPrinter::emitAttributes() {
     }
   }
 
-  // TODO: We currently only support either reserving the register, or treating
-  // it as another callee-saved register, but not as SB or a TLS pointer; It
-  // would instead be nicer to push this from the frontend as metadata, as we do
-  // for the wchar and enum size tags
-  if (STI.isR9Reserved())
-    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use, ARMBuildAttrs::R9Reserved);
+  // We currently do not support using R9 as the TLS pointer.
+  if (STI.isRWPI())
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+                      ARMBuildAttrs::R9IsSB);
+  else if (STI.isR9Reserved())
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+                      ARMBuildAttrs::R9Reserved);
   else
-    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use, ARMBuildAttrs::R9IsGPR);
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+                      ARMBuildAttrs::R9IsGPR);
 
   if (STI.hasTrustZone() && STI.hasVirtualization())
     ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
@@ -899,6 +912,8 @@ getModifierVariantKind(ARMCP::ARMCPModifier Modifier) {
     return MCSymbolRefExpr::VK_TPOFF;
   case ARMCP::GOTTPOFF:
     return MCSymbolRefExpr::VK_GOTTPOFF;
+  case ARMCP::SBREL:
+    return MCSymbolRefExpr::VK_ARM_SBREL;
   case ARMCP::GOT_PREL:
     return MCSymbolRefExpr::VK_ARM_GOT_PREL;
   case ARMCP::SECREL:
@@ -910,8 +925,8 @@ getModifierVariantKind(ARMCP::ARMCPModifier Modifier) {
 MCSymbol *ARMAsmPrinter::GetARMGVSymbol(const GlobalValue *GV,
                                         unsigned char TargetFlags) {
   if (Subtarget->isTargetMachO()) {
-    bool IsIndirect = (TargetFlags & ARMII::MO_NONLAZY) &&
-      Subtarget->GVIsIndirectSymbol(GV, TM.getRelocationModel());
+    bool IsIndirect =
+        (TargetFlags & ARMII::MO_NONLAZY) && Subtarget->isGVIndirectSymbol(GV);
 
     if (!IsIndirect)
       return getSymbol(GV);
@@ -1037,7 +1052,7 @@ void ARMAsmPrinter::EmitJumpTableAddrs(const MachineInstr *MI) {
     //    .word (LBB1 - LJTI_0_0)
     const MCExpr *Expr = MCSymbolRefExpr::create(MBB->getSymbol(), OutContext);
 
-    if (isPositionIndependent())
+    if (isPositionIndependent() || Subtarget->isROPI())
       Expr = MCBinaryExpr::createSub(Expr, MCSymbolRefExpr::create(JTISymbol,
                                                                    OutContext),
                                      OutContext);
@@ -1882,8 +1897,7 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       .addReg(0));
     return;
   }
-  case ARM::tInt_eh_sjlj_longjmp:
-  case ARM::tInt_WIN_eh_sjlj_longjmp: {
+  case ARM::tInt_eh_sjlj_longjmp: {
     // ldr $scratch, [$src, #8]
     // mov sp, $scratch
     // ldr $scratch, [$src, #4]
@@ -1918,7 +1932,7 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       .addReg(0));
 
     EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::tLDRi)
-      .addReg(Opc == ARM::tInt_WIN_eh_sjlj_longjmp ? ARM::R11 : ARM::R7)
+      .addReg(ARM::R7)
       .addReg(SrcReg)
       .addImm(0)
       // Predicate.
@@ -1930,6 +1944,36 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       // Predicate.
       .addImm(ARMCC::AL)
       .addReg(0));
+    return;
+  }
+  case ARM::tInt_WIN_eh_sjlj_longjmp: {
+    // ldr.w r11, [$src, #0]
+    // ldr.w  sp, [$src, #8]
+    // ldr.w  pc, [$src, #4]
+
+    unsigned SrcReg = MI->getOperand(0).getReg();
+
+    EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::t2LDRi12)
+                                     .addReg(ARM::R11)
+                                     .addReg(SrcReg)
+                                     .addImm(0)
+                                     // Predicate
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::t2LDRi12)
+                                     .addReg(ARM::SP)
+                                     .addReg(SrcReg)
+                                     .addImm(8)
+                                     // Predicate
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::t2LDRi12)
+                                     .addReg(ARM::PC)
+                                     .addReg(SrcReg)
+                                     .addImm(4)
+                                     // Predicate
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
     return;
   }
   }

@@ -11,12 +11,12 @@
 
 #include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 #include "llvm/DebugInfo/CodeView/CodeView.h"
-#include "llvm/DebugInfo/CodeView/StreamReader.h"
+#include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
 #include "llvm/DebugInfo/CodeView/TypeIndex.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
+#include "llvm/DebugInfo/MSF/MappedBlockStream.h"
+#include "llvm/DebugInfo/MSF/StreamReader.h"
 #include "llvm/DebugInfo/PDB/Raw/Hash.h"
-#include "llvm/DebugInfo/PDB/Raw/IndexedStreamData.h"
-#include "llvm/DebugInfo/PDB/Raw/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
@@ -27,6 +27,7 @@
 using namespace llvm;
 using namespace llvm::codeview;
 using namespace llvm::support;
+using namespace llvm::msf;
 using namespace llvm::pdb;
 
 namespace {
@@ -66,7 +67,7 @@ TpiStream::~TpiStream() {}
 
 // Corresponds to `fUDTAnon`.
 template <typename T> static bool isAnonymous(T &Rec) {
-  StringRef Name = Rec.getUniqueName();
+  StringRef Name = Rec.getName();
   return Name == "<unnamed-tag>" || Name == "__unnamed" ||
       Name.endswith("::<unnamed-tag>") || Name.endswith("::__unnamed");
 }
@@ -96,17 +97,28 @@ public:
                   uint32_t NumHashBuckets)
       : HashValues(HashValues), NumHashBuckets(NumHashBuckets) {}
 
-  Error visitUdtSourceLine(UdtSourceLineRecord &Rec) override {
+  Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,
+                         UdtSourceLineRecord &Rec) override {
     return verifySourceLine(Rec);
   }
 
-  Error visitUdtModSourceLine(UdtModSourceLineRecord &Rec) override {
+  Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,
+                         UdtModSourceLineRecord &Rec) override {
     return verifySourceLine(Rec);
   }
 
-  Error visitClass(ClassRecord &Rec) override { return verify(Rec); }
-  Error visitEnum(EnumRecord &Rec) override { return verify(Rec); }
-  Error visitUnion(UnionRecord &Rec) override { return verify(Rec); }
+  Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,
+                         ClassRecord &Rec) override {
+    return verify(Rec);
+  }
+  Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,
+                         EnumRecord &Rec) override {
+    return verify(Rec);
+  }
+  Error visitKnownRecord(const CVRecord<TypeLeafKind> &CVR,
+                         UnionRecord &Rec) override {
+    return verify(Rec);
+  }
 
   Error visitTypeBegin(const CVRecord<TypeLeafKind> &Rec) override {
     ++Index;
@@ -118,7 +130,7 @@ private:
   template <typename T> Error verify(T &Rec) {
     uint32_t Hash = getTpiHash(Rec, *RawRecord);
     if (Hash % NumHashBuckets != HashValues[Index])
-      return make_error<RawError>(raw_error_code::invalid_tpi_hash);
+      return errorInvalidHash();
     return Error::success();
   }
 
@@ -127,8 +139,14 @@ private:
     support::endian::write32le(Buf, Rec.getUDT().getIndex());
     uint32_t Hash = hashStringV1(StringRef(Buf, 4));
     if (Hash % NumHashBuckets != HashValues[Index])
-      return make_error<RawError>(raw_error_code::invalid_tpi_hash);
+      return errorInvalidHash();
     return Error::success();
+  }
+
+  Error errorInvalidHash() {
+    return make_error<RawError>(
+        raw_error_code::invalid_tpi_hash,
+        "Type index is 0x" + utohexstr(TypeIndex::FirstNonSimpleIndex + Index));
   }
 
   FixedStreamArray<support::ulittle32_t> HashValues;
@@ -142,7 +160,8 @@ private:
 // Currently we only verify SRC_LINE records.
 Error TpiStream::verifyHashValues() {
   TpiHashVerifier Verifier(HashValues, Header->NumHashBuckets);
-  CVTypeVisitor Visitor(Verifier);
+  TypeDeserializer Deserializer(Verifier);
+  CVTypeVisitor Visitor(Deserializer);
   return Visitor.visitTypeStream(TypeRecords);
 }
 
@@ -182,12 +201,9 @@ Error TpiStream::reload() {
   if (Header->HashStreamIndex >= Pdb.getNumStreams())
     return make_error<RawError>(raw_error_code::corrupt_file,
                                 "Invalid TPI hash stream index.");
-
-  auto HS =
-      MappedBlockStream::createIndexedStream(Header->HashStreamIndex, Pdb);
-  if (!HS)
-    return HS.takeError();
-  StreamReader HSR(**HS);
+  auto HS = MappedBlockStream::createIndexedStream(
+      Pdb.getMsfLayout(), Pdb.getMsfBuffer(), Header->HashStreamIndex);
+  StreamReader HSR(*HS);
 
   uint32_t NumHashValues = Header->HashValueBuffer.Length / sizeof(ulittle32_t);
   if (NumHashValues != NumTypeRecords())
@@ -210,7 +226,7 @@ Error TpiStream::reload() {
   if (auto EC = HSR.readArray(HashAdjustments, NumHashAdjustments))
     return EC;
 
-  HashStream = std::move(*HS);
+  HashStream = std::move(HS);
 
   // TPI hash table is a parallel array for the type records.
   // Verify that the hash values match with type records.
@@ -263,3 +279,5 @@ iterator_range<CVTypeArray::Iterator>
 TpiStream::types(bool *HadError) const {
   return llvm::make_range(TypeRecords.begin(HadError), TypeRecords.end());
 }
+
+Error TpiStream::commit() { return Error::success(); }

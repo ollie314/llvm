@@ -67,10 +67,6 @@ void TailDuplicator::initMF(MachineFunction &MF, const MachineModuleInfo *MMIin,
   assert(MBPI != nullptr && "Machine Branch Probability Info required");
 
   PreRegAlloc = MRI->isSSA();
-  RS.reset();
-
-  if (MRI->tracksLiveness() && TRI->trackLivenessAfterRegAlloc(MF))
-    RS.reset(new RegScavenger());
 }
 
 static void VerifyPHIs(MachineFunction &MF, bool CheckExtra) {
@@ -341,7 +337,7 @@ void TailDuplicator::duplicateInstruction(
     MachineFunction &MF,
     DenseMap<unsigned, RegSubRegPair> &LocalVRMap,
     const DenseSet<unsigned> &UsedByPhi) {
-  MachineInstr *NewMI = TII->duplicate(MI, MF);
+  MachineInstr *NewMI = TII->duplicate(*MI, MF);
   if (PreRegAlloc) {
     for (unsigned i = 0, e = NewMI->getNumOperands(); i != e; ++i) {
       MachineOperand &MO = NewMI->getOperand(i);
@@ -529,6 +525,16 @@ bool TailDuplicator::shouldTailDuplicate(const MachineFunction &MF,
   else
     MaxDuplicateCount = TailDuplicateSize;
 
+  // If the block to be duplicated ends in an unanalyzable fallthrough, don't
+  // duplicate it.
+  // A similar check is necessary in MachineBlockPlacement to make sure pairs of
+  // blocks with unanalyzable fallthrough get layed out contiguously.
+  MachineBasicBlock *PredTBB = nullptr, *PredFBB = nullptr;
+  SmallVector<MachineOperand, 4> PredCond;
+  if (TII->analyzeBranch(TailBB, PredTBB, PredFBB, PredCond, true)
+      && TailBB.canFallThrough())
+    return false;
+
   // If the target has hardware branch prediction that can handle indirect
   // branches, duplicating them can often make them predictable when there
   // are common paths through the code.  The limit needs to be high enough
@@ -635,7 +641,7 @@ bool TailDuplicator::canCompletelyDuplicateBB(MachineBasicBlock &BB) {
 
     MachineBasicBlock *PredTBB = nullptr, *PredFBB = nullptr;
     SmallVector<MachineOperand, 4> PredCond;
-    if (TII->AnalyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
+    if (TII->analyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
       return false;
 
     if (!PredCond.empty())
@@ -666,7 +672,7 @@ bool TailDuplicator::duplicateSimpleBB(
 
     MachineBasicBlock *PredTBB = nullptr, *PredFBB = nullptr;
     SmallVector<MachineOperand, 4> PredCond;
-    if (TII->AnalyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
+    if (TII->analyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
       continue;
 
     Changed = true;
@@ -721,6 +727,21 @@ bool TailDuplicator::duplicateSimpleBB(
   return Changed;
 }
 
+bool TailDuplicator::canTailDuplicate(MachineBasicBlock *TailBB,
+                                      MachineBasicBlock *PredBB) {
+  // EH edges are ignored by AnalyzeBranch.
+  if (PredBB->succ_size() > 1)
+    return false;
+
+  MachineBasicBlock *PredTBB, *PredFBB;
+  SmallVector<MachineOperand, 4> PredCond;
+  if (TII->analyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
+    return false;
+  if (!PredCond.empty())
+    return false;
+  return true;
+}
+
 /// If it is profitable, duplicate TailBB's contents in each
 /// of its predecessors.
 bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
@@ -745,19 +766,12 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
                                                         PE = Preds.end();
        PI != PE; ++PI) {
     MachineBasicBlock *PredBB = *PI;
-
     assert(TailBB != PredBB &&
            "Single-block loop should have been rejected earlier!");
-    // EH edges are ignored by AnalyzeBranch.
-    if (PredBB->succ_size() > 1)
+
+    if (!canTailDuplicate(TailBB, PredBB))
       continue;
 
-    MachineBasicBlock *PredTBB, *PredFBB;
-    SmallVector<MachineOperand, 4> PredCond;
-    if (TII->AnalyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true))
-      continue;
-    if (!PredCond.empty())
-      continue;
     // Don't duplicate into a fall-through predecessor (at least for now).
     if (PredBB->isLayoutSuccessor(TailBB) && PredBB->canFallThrough())
       continue;
@@ -769,20 +783,6 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
 
     // Remove PredBB's unconditional branch.
     TII->RemoveBranch(*PredBB);
-
-    if (RS && !TailBB->livein_empty()) {
-      // Update PredBB livein.
-      RS->enterBasicBlock(*PredBB);
-      if (!PredBB->empty())
-        RS->forward(std::prev(PredBB->end()));
-      for (const auto &LI : TailBB->liveins()) {
-        if (!RS->isRegUsed(LI.PhysReg, false))
-          // If a register is previously livein to the tail but it's not live
-          // at the end of predecessor BB, then it should be added to its
-          // livein list.
-          PredBB->addLiveIn(LI);
-      }
-    }
 
     // Clone the contents of TailBB into PredBB.
     DenseMap<unsigned, RegSubRegPair> LocalVRMap;
@@ -806,7 +806,9 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
     appendCopies(PredBB, CopyInfos, Copies);
 
     // Simplify
-    TII->AnalyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true);
+    MachineBasicBlock *PredTBB, *PredFBB;
+    SmallVector<MachineOperand, 4> PredCond;
+    TII->analyzeBranch(*PredBB, PredTBB, PredFBB, PredCond, true);
 
     NumTailDupAdded += TailBB->size() - 1; // subtract one for removed branch
 
@@ -832,7 +834,9 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
   // This has to check PrevBB->succ_size() because EH edges are ignored by
   // AnalyzeBranch.
   if (PrevBB->succ_size() == 1 &&
-      !TII->AnalyzeBranch(*PrevBB, PriorTBB, PriorFBB, PriorCond, true) &&
+      // Layout preds are not always CFG preds. Check.
+      *PrevBB->succ_begin() == TailBB &&
+      !TII->analyzeBranch(*PrevBB, PriorTBB, PriorFBB, PriorCond, true) &&
       PriorCond.empty() && !PriorTBB && TailBB->pred_size() == 1 &&
       !TailBB->hasAddressTaken()) {
     DEBUG(dbgs() << "\nMerging into block: " << *PrevBB
@@ -896,7 +900,7 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
                                                         PE = Preds.end();
        PI != PE; ++PI) {
     MachineBasicBlock *PredBB = *PI;
-    if (std::find(TDBBs.begin(), TDBBs.end(), PredBB) != TDBBs.end())
+    if (is_contained(TDBBs, PredBB))
       continue;
 
     // EH edges

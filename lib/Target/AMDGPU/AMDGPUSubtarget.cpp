@@ -13,7 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "AMDGPUSubtarget.h"
-#include "AMDGPUCallLowering.h"
 #include "R600ISelLowering.h"
 #include "R600InstrInfo.h"
 #include "SIFrameLowering.h"
@@ -48,7 +47,7 @@ AMDGPUSubtarget::initializeSubtargetDependencies(const Triple &TT,
 
   SmallString<256> FullFS("+promote-alloca,+fp64-denormals,+load-store-opt,");
   if (isAmdHsaOS()) // Turn on FlatForGlobal for HSA.
-    FullFS += "+flat-for-global,";
+    FullFS += "+flat-for-global,+unaligned-buffer-access,";
   FullFS += FS;
 
   ParseSubtargetFeatures(GPU, FullFS);
@@ -86,6 +85,8 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     FP64Denormals(false),
     FPExceptions(false),
     FlatForGlobal(false),
+    UnalignedBufferAccess(false),
+
     EnableXNACK(false),
     DebuggerInsertNops(false),
     DebuggerReserveRegs(false),
@@ -115,8 +116,8 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     TexVTXClauseSize(0),
 
     FeatureDisable(false),
-
-    InstrItins(getInstrItineraryForCPU(GPU)) {
+    InstrItins(getInstrItineraryForCPU(GPU)),
+    TSInfo() {
   initializeSubtargetDependencies(TT, GPU, FS);
 }
 
@@ -190,24 +191,10 @@ SISubtarget::SISubtarget(const Triple &TT, StringRef GPU, StringRef FS,
   AMDGPUSubtarget(TT, GPU, FS, TM),
   InstrInfo(*this),
   FrameLowering(TargetFrameLowering::StackGrowsUp, getStackAlignment(), 0),
-  TLInfo(TM, *this) {}
-
-unsigned R600Subtarget::getStackEntrySize() const {
-  switch (getWavefrontSize()) {
-  case 16:
-    return 8;
-  case 32:
-    return hasCaymanISA() ? 4 : 8;
-  case 64:
-    return 4;
-  default:
-    llvm_unreachable("Illegal wavefront size.");
-  }
-}
+  TLInfo(TM, *this),
+  GISel() {}
 
 void SISubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
-                                      MachineInstr *begin,
-                                      MachineInstr *end,
                                       unsigned NumRegionInstrs) const {
   // Track register pressure so the scheduler can try to decrease
   // pressure once register usage is above the threshold defined by
@@ -226,17 +213,4 @@ void SISubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
 
 bool SISubtarget::isVGPRSpillingEnabled(const Function& F) const {
   return EnableVGPRSpilling || !AMDGPU::isShader(F.getCallingConv());
-}
-
-unsigned SISubtarget::getAmdKernelCodeChipID() const {
-  switch (getGeneration()) {
-  case SEA_ISLANDS:
-    return 12;
-  default:
-    llvm_unreachable("ChipID unknown");
-  }
-}
-
-AMDGPU::IsaVersion SISubtarget::getIsaVersion() const {
-  return AMDGPU::getIsaVersion(getFeatureBits());
 }
