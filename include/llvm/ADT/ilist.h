@@ -11,33 +11,20 @@
 // (i.e. each node of the list must contain a next and previous field for the
 // list.
 //
-// The ilist_traits trait class is used to gain access to the next and previous
-// fields of the node type that the list is instantiated with.  If it is not
-// specialized, the list defaults to using the getPrev(), getNext() method calls
-// to get the next and previous pointers.
+// The ilist class itself should be a plug in replacement for list.  This list
+// replacement does not provide a constant time size() method, so be careful to
+// use empty() when you really want to know if it's empty.
 //
-// The ilist class itself, should be a plug in replacement for list, assuming
-// that the nodes contain next/prev pointers.  This list replacement does not
-// provide a constant time size() method, so be careful to use empty() when you
-// really want to know if it's empty.
-//
-// The ilist class is implemented by allocating a 'tail' node when the list is
-// created (using ilist_traits<>::createSentinel()).  This tail node is
-// absolutely required because the user must be able to compute end()-1. Because
-// of this, users of the direct next/prev links will see an extra link on the
-// end of the list, which should be ignored.
-//
-// Requirements for a user of this list:
-//
-//   1. The user must provide {g|s}et{Next|Prev} methods, or specialize
-//      ilist_traits to provide an alternate way of getting and setting next and
-//      prev links.
+// The ilist class is implemented as a circular list.  The list itself contains
+// a sentinel node, whose Next points at begin() and whose Prev points at
+// rbegin().  The sentinel node itself serves as end() and rend().
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_ADT_ILIST_H
 #define LLVM_ADT_ILIST_H
 
+#include "llvm/ADT/ilist_node.h"
 #include "llvm/Support/Compiler.h"
 #include <algorithm>
 #include <cassert>
@@ -50,107 +37,94 @@ namespace llvm {
 template<typename NodeTy, typename Traits> class iplist;
 template<typename NodeTy> class ilist_iterator;
 
-/// ilist_nextprev_traits - A fragment for template traits for intrusive list
-/// that provides default next/prev implementations for common operations.
+/// An access class for ilist_node private API.
 ///
-template<typename NodeTy>
-struct ilist_nextprev_traits {
-  static NodeTy *getPrev(NodeTy *N) { return N->getPrev(); }
-  static NodeTy *getNext(NodeTy *N) { return N->getNext(); }
-  static const NodeTy *getPrev(const NodeTy *N) { return N->getPrev(); }
-  static const NodeTy *getNext(const NodeTy *N) { return N->getNext(); }
-
-  static void setPrev(NodeTy *N, NodeTy *Prev) { N->setPrev(Prev); }
-  static void setNext(NodeTy *N, NodeTy *Next) { N->setNext(Next); }
-};
-
-template<typename NodeTy>
-struct ilist_traits;
-
-/// ilist_sentinel_traits - A fragment for template traits for intrusive list
-/// that provides default sentinel implementations for common operations.
+/// This gives access to the private parts of ilist nodes.  Nodes for an ilist
+/// should friend this class if they inherit privately from ilist_node.
 ///
-/// ilist_sentinel_traits implements a lazy dynamic sentinel allocation
-/// strategy. The sentinel is stored in the prev field of ilist's Head.
-///
-template<typename NodeTy>
-struct ilist_sentinel_traits {
-  /// createSentinel - create the dynamic sentinel
-  static NodeTy *createSentinel() { return new NodeTy(); }
-
-  /// destroySentinel - deallocate the dynamic sentinel
-  static void destroySentinel(NodeTy *N) { delete N; }
-
-  /// provideInitialHead - when constructing an ilist, provide a starting
-  /// value for its Head
-  /// @return null node to indicate that it needs to be allocated later
-  static NodeTy *provideInitialHead() { return nullptr; }
-
-  /// ensureHead - make sure that Head is either already
-  /// initialized or assigned a fresh sentinel
-  /// @return the sentinel
-  static NodeTy *ensureHead(NodeTy *&Head) {
-    if (!Head) {
-      Head = ilist_traits<NodeTy>::createSentinel();
-      ilist_traits<NodeTy>::noteHead(Head, Head);
-      ilist_traits<NodeTy>::setNext(Head, nullptr);
-      return Head;
-    }
-    return ilist_traits<NodeTy>::getPrev(Head);
+/// It's strongly discouraged to *use* this class outside of the ilist
+/// implementation.
+struct ilist_node_access {
+  template <typename T> static ilist_node<T> *getNodePtr(T *N) { return N; }
+  template <typename T> static const ilist_node<T> *getNodePtr(const T *N) {
+    return N;
   }
 
-  /// noteHead - stash the sentinel into its default location
-  static void noteHead(NodeTy *NewHead, NodeTy *Sentinel) {
-    ilist_traits<NodeTy>::setPrev(NewHead, Sentinel);
+  template <typename T> static ilist_node<T> *getPrev(ilist_node<T> *N) {
+    return N->getPrev();
+  }
+  template <typename T> static ilist_node<T> *getNext(ilist_node<T> *N) {
+    return N->getNext();
+  }
+  template <typename T> static const ilist_node<T> *getPrev(const ilist_node<T> *N) {
+    return N->getPrev();
+  }
+  template <typename T> static const ilist_node<T> *getNext(const ilist_node<T> *N) {
+    return N->getNext();
+  }
+
+  template <typename T> static void setPrev(ilist_node<T> *N, ilist_node<T> *Prev) {
+    N->setPrev(Prev);
+  }
+  template <typename T> static void setNext(ilist_node<T> *N, ilist_node<T> *Next) {
+    N->setNext(Next);
+  }
+  template <typename T> static void setPrev(ilist_node<T> *N, std::nullptr_t) {
+    N->setPrev(nullptr);
+  }
+  template <typename T> static void setNext(ilist_node<T> *N, std::nullptr_t) {
+    N->setNext(nullptr);
   }
 };
 
-template <typename NodeTy> class ilist_half_node;
-template <typename NodeTy> class ilist_node;
+namespace ilist_detail {
 
-/// Traits with an embedded ilist_node as a sentinel.
-///
-/// FIXME: The downcast in createSentinel() is UB.
-template <typename NodeTy> struct ilist_embedded_sentinel_traits {
-  /// Get hold of the node that marks the end of the list.
-  NodeTy *createSentinel() const {
-    // Since i(p)lists always publicly derive from their corresponding traits,
-    // placing a data member in this class will augment the i(p)list.  But since
-    // the NodeTy is expected to be publicly derive from ilist_node<NodeTy>,
-    // there is a legal viable downcast from it to NodeTy. We use this trick to
-    // superimpose an i(p)list with a "ghostly" NodeTy, which becomes the
-    // sentinel. Dereferencing the sentinel is forbidden (save the
-    // ilist_node<NodeTy>), so no one will ever notice the superposition.
-    return static_cast<NodeTy *>(&Sentinel);
-  }
-  static void destroySentinel(NodeTy *) {}
+template <class T> T &make();
 
-  NodeTy *provideInitialHead() const { return createSentinel(); }
-  NodeTy *ensureHead(NodeTy *) const { return createSentinel(); }
-  static void noteHead(NodeTy *, NodeTy *) {}
+/// Type trait to check for a traits class that has a getNext member (as a
+/// canary for any of the ilist_nextprev_traits API).
+template <class TraitsT, class NodeT> class HasGetNext {
+  typedef char Yes[1];
+  typedef char No[2];
+  template <size_t N> struct SFINAE {};
 
-private:
-  mutable ilist_node<NodeTy> Sentinel;
+  template <class U>
+  static Yes &test(U *I, decltype(I->getNext(&make<NodeT>())) * = 0);
+  template <class> static No &test(...);
+
+public:
+  static const bool value = sizeof(test<TraitsT>(nullptr)) == sizeof(Yes);
 };
 
-/// Trait with an embedded ilist_half_node as a sentinel.
-///
-/// FIXME: The downcast in createSentinel() is UB.
-template <typename NodeTy> struct ilist_half_embedded_sentinel_traits {
-  /// Get hold of the node that marks the end of the list.
-  NodeTy *createSentinel() const {
-    // See comment in ilist_embedded_sentinel_traits::createSentinel().
-    return static_cast<NodeTy *>(&Sentinel);
-  }
-  static void destroySentinel(NodeTy *) {}
+/// Type trait to check for a traits class that has a createSentinel member (as
+/// a canary for any of the ilist_sentinel_traits API).
+template <class TraitsT> class HasCreateSentinel {
+  typedef char Yes[1];
+  typedef char No[2];
+  template <size_t N> struct SFINAE {};
 
-  NodeTy *provideInitialHead() const { return createSentinel(); }
-  NodeTy *ensureHead(NodeTy *) const { return createSentinel(); }
-  static void noteHead(NodeTy *, NodeTy *) {}
+  template <class U>
+  static Yes &test(U *I, decltype(I->createSentinel()) * = 0);
+  template <class U> static No &test(...);
 
-private:
-  mutable ilist_half_node<NodeTy> Sentinel;
+public:
+  static const bool value = sizeof(test<TraitsT>(nullptr)) == sizeof(Yes);
 };
+
+template <class TraitsT, class NodeT> struct HasObsoleteCustomization {
+  static const bool value =
+      HasGetNext<TraitsT, NodeT>::value || HasCreateSentinel<TraitsT>::value;
+};
+
+} // end namespace ilist_detail
+
+template <typename NodeTy> struct ilist_traits;
+
+// TODO: Delete uses from subprojects, then delete these.
+template <typename NodeTy> struct ilist_sentinel_traits {};
+template <typename NodeTy> struct ilist_embedded_sentinel_traits {};
+template <typename NodeTy> struct ilist_half_embedded_sentinel_traits {};
+template <typename NodeTy> struct ilist_full_embedded_sentinel_traits {};
 
 /// ilist_node_traits - A fragment for template traits for intrusive list
 /// that provides default node related operations.
@@ -171,11 +145,8 @@ struct ilist_node_traits {
 /// By inheriting from this, you can easily use default implementations
 /// for all common operations.
 ///
-template<typename NodeTy>
-struct ilist_default_traits : public ilist_nextprev_traits<NodeTy>,
-                              public ilist_sentinel_traits<NodeTy>,
-                              public ilist_node_traits<NodeTy> {
-};
+template <typename NodeTy>
+struct ilist_default_traits : public ilist_node_traits<NodeTy> {};
 
 // Template traits for intrusive list.  By specializing this template class, you
 // can change what next/prev fields are used to store the links...
@@ -202,7 +173,6 @@ template <typename NodeTy>
 class ilist_iterator
     : public std::iterator<std::bidirectional_iterator_tag, NodeTy, ptrdiff_t> {
 public:
-  typedef ilist_traits<NodeTy> Traits;
   typedef std::iterator<std::bidirectional_iterator_tag, NodeTy, ptrdiff_t>
       super;
 
@@ -219,16 +189,15 @@ public:
   typedef node_type &node_reference;
 
 private:
-  pointer NodePtr;
+  node_pointer NodePtr = nullptr;
 
 public:
   /// Create from an ilist_node.
-  explicit ilist_iterator(node_reference N)
-      : NodePtr(static_cast<NodeTy *>(&N)) {}
+  explicit ilist_iterator(node_reference N) : NodePtr(&N) {}
 
   explicit ilist_iterator(pointer NP) : NodePtr(NP) {}
   explicit ilist_iterator(reference NR) : NodePtr(&NR) {}
-  ilist_iterator() : NodePtr(nullptr) {}
+  ilist_iterator() = default;
 
   // This is templated so that we can allow constructing a const iterator from
   // a nonconst iterator...
@@ -237,20 +206,23 @@ public:
       const ilist_iterator<node_ty> &RHS,
       typename std::enable_if<std::is_convertible<node_ty *, NodeTy *>::value,
                               void *>::type = nullptr)
-      : NodePtr(RHS.getNodePtrUnchecked()) {}
+      : NodePtr(RHS.getNodePtr()) {}
 
   // This is templated so that we can allow assigning to a const iterator from
   // a nonconst iterator...
   template <class node_ty>
   const ilist_iterator &operator=(const ilist_iterator<node_ty> &RHS) {
-    NodePtr = RHS.getNodePtrUnchecked();
+    NodePtr = RHS.getNodePtr();
     return *this;
   }
 
   void reset(pointer NP) { NodePtr = NP; }
 
   // Accessors...
-  reference operator*() const { return *NodePtr; }
+  reference operator*() const {
+    assert(!NodePtr->isKnownSentinel());
+    return static_cast<NodeTy &>(*getNodePtr());
+  }
   pointer operator->() const { return &operator*(); }
 
   // Comparison operators
@@ -263,12 +235,12 @@ public:
 
   // Increment and decrement operators...
   ilist_iterator &operator--() {
-    NodePtr = Traits::getPrev(NodePtr);
+    NodePtr = ilist_node_access::getPrev(NodePtr);
     assert(NodePtr && "--'d off the beginning of an ilist!");
     return *this;
   }
   ilist_iterator &operator++() {
-    NodePtr = Traits::getNext(NodePtr);
+    NodePtr = ilist_node_access::getNext(NodePtr);
     return *this;
   }
   ilist_iterator operator--(int) {
@@ -284,9 +256,6 @@ public:
 
   /// Get the underlying ilist_node.
   node_pointer getNodePtr() const { return static_cast<node_pointer>(NodePtr); }
-
-  // Internal interface, do not use...
-  pointer getNodePtrUnchecked() const { return NodePtr; }
 };
 
 // Allow ilist_iterators to convert into pointers to a node automatically when
@@ -312,49 +281,27 @@ template<typename NodeTy> struct simplify_type<const ilist_iterator<NodeTy> > {
 
 //===----------------------------------------------------------------------===//
 //
-/// iplist - The subset of list functionality that can safely be used on nodes
-/// of polymorphic types, i.e. a heterogeneous list with a common base class that
-/// holds the next/prev pointers.  The only state of the list itself is a single
-/// pointer to the head of the list.
-///
-/// This list can be in one of three interesting states:
-/// 1. The list may be completely unconstructed.  In this case, the head
-///    pointer is null.  When in this form, any query for an iterator (e.g.
-///    begin() or end()) causes the list to transparently change to state #2.
-/// 2. The list may be empty, but contain a sentinel for the end iterator. This
-///    sentinel is created by the Traits::createSentinel method and is a link
-///    in the list.  When the list is empty, the pointer in the iplist points
-///    to the sentinel.  Once the sentinel is constructed, it
-///    is not destroyed until the list is.
-/// 3. The list may contain actual objects in it, which are stored as a doubly
-///    linked list of nodes.  One invariant of the list is that the predecessor
-///    of the first node in the list always points to the last node in the list,
-///    and the successor pointer for the sentinel (which always stays at the
-///    end of the list) is always null.
-///
-template<typename NodeTy, typename Traits=ilist_traits<NodeTy> >
-class iplist : public Traits {
-  mutable NodeTy *Head;
+/// The subset of list functionality that can safely be used on nodes of
+/// polymorphic types, i.e. a heterogeneous list with a common base class that
+/// holds the next/prev pointers.  The only state of the list itself is an
+/// ilist_sentinel, which holds pointers to the first and last nodes in the
+/// list.
+template <typename NodeTy, typename Traits = ilist_traits<NodeTy>>
+class iplist : public Traits, ilist_node_access {
+  // TODO: Drop these assertions anytime after 4.0 is branched (keep them for
+  // one release to help out-of-tree code update).
+  static_assert(!ilist_detail::HasObsoleteCustomization<Traits, NodeTy>::value,
+                "ilist customization points have changed!");
 
-  // Use the prev node pointer of 'head' as the tail pointer.  This is really a
-  // circularly linked list where we snip the 'next' link from the sentinel node
-  // back to the first node in the list (to preserve assertions about going off
-  // the end of the list).
-  NodeTy *getTail() { return this->ensureHead(Head); }
-  const NodeTy *getTail() const { return this->ensureHead(Head); }
-  void setTail(NodeTy *N) const { this->noteHead(Head, N); }
+  ilist_sentinel<NodeTy> Sentinel;
 
-  /// CreateLazySentinel - This method verifies whether the sentinel for the
-  /// list has been created and lazily makes it if not.
-  void CreateLazySentinel() const {
-    this->ensureHead(Head);
-  }
+  typedef ilist_node<NodeTy> node_type;
+  typedef const ilist_node<NodeTy> const_node_type;
 
   static bool op_less(NodeTy &L, NodeTy &R) { return L < R; }
   static bool op_equal(NodeTy &L, NodeTy &R) { return L == R; }
 
-  // No fundamental reason why iplist can't be copyable, but the default
-  // copy/copy-assign won't do.
+  // Copying intrusively linked nodes doesn't make sense.
   iplist(const iplist &) = delete;
   void operator=(const iplist &) = delete;
 
@@ -371,30 +318,14 @@ public:
   typedef std::reverse_iterator<const_iterator>  const_reverse_iterator;
   typedef std::reverse_iterator<iterator>  reverse_iterator;
 
-  iplist() : Head(this->provideInitialHead()) {}
-  ~iplist() {
-    if (!Head) return;
-    clear();
-    Traits::destroySentinel(getTail());
-  }
+  iplist() = default;
+  ~iplist() { clear(); }
 
   // Iterator creation methods.
-  iterator begin() {
-    CreateLazySentinel();
-    return iterator(Head);
-  }
-  const_iterator begin() const {
-    CreateLazySentinel();
-    return const_iterator(Head);
-  }
-  iterator end() {
-    CreateLazySentinel();
-    return iterator(getTail());
-  }
-  const_iterator end() const {
-    CreateLazySentinel();
-    return const_iterator(getTail());
-  }
+  iterator begin() { return ++iterator(Sentinel); }
+  const_iterator begin() const { return ++const_iterator(Sentinel); }
+  iterator end() { return iterator(Sentinel); }
+  const_iterator end() const { return const_iterator(Sentinel); }
 
   // reverse iterator creation methods.
   reverse_iterator rbegin()            { return reverse_iterator(end()); }
@@ -405,44 +336,39 @@ public:
 
   // Miscellaneous inspection routines.
   size_type max_size() const { return size_type(-1); }
-  bool LLVM_ATTRIBUTE_UNUSED_RESULT empty() const {
-    return !Head || Head == getTail();
-  }
+  bool LLVM_ATTRIBUTE_UNUSED_RESULT empty() const { return Sentinel.empty(); }
 
   // Front and back accessor functions...
   reference front() {
     assert(!empty() && "Called front() on empty list!");
-    return *Head;
+    return *begin();
   }
   const_reference front() const {
     assert(!empty() && "Called front() on empty list!");
-    return *Head;
+    return *begin();
   }
   reference back() {
     assert(!empty() && "Called back() on empty list!");
-    return *this->getPrev(getTail());
+    return *--end();
   }
   const_reference back() const {
     assert(!empty() && "Called back() on empty list!");
-    return *this->getPrev(getTail());
+    return *--end();
   }
 
   void swap(iplist &RHS) {
     assert(0 && "Swap does not use list traits callback correctly yet!");
-    std::swap(Head, RHS.Head);
+    std::swap(Sentinel, RHS.Sentinel);
   }
 
   iterator insert(iterator where, NodeTy *New) {
-    NodeTy *CurNode = where.getNodePtrUnchecked();
-    NodeTy *PrevNode = this->getPrev(CurNode);
-    this->setNext(New, CurNode);
-    this->setPrev(New, PrevNode);
-
-    if (CurNode != Head)  // Is PrevNode off the beginning of the list?
-      this->setNext(PrevNode, New);
-    else
-      Head = New;
-    this->setPrev(CurNode, New);
+    node_type *NewN = this->getNodePtr(New);
+    node_type *Next = where.getNodePtr();
+    node_type *Prev = this->getPrev(Next);
+    this->setNext(NewN, Next);
+    this->setPrev(NewN, Prev);
+    this->setNext(Prev, NewN);
+    this->setPrev(Next, NewN);
 
     this->addNodeToList(New);  // Notify traits that we added a node...
     return iterator(New);
@@ -462,24 +388,23 @@ public:
   NodeTy *remove(iterator &IT) {
     assert(IT != end() && "Cannot remove end of list!");
     NodeTy *Node = &*IT;
-    NodeTy *NextNode = this->getNext(Node);
-    NodeTy *PrevNode = this->getPrev(Node);
+    node_type *Base = this->getNodePtr(Node);
+    node_type *Next = this->getNext(Base);
+    node_type *Prev = this->getPrev(Base);
 
-    if (Node != Head)  // Is PrevNode off the beginning of the list?
-      this->setNext(PrevNode, NextNode);
-    else
-      Head = NextNode;
-    this->setPrev(NextNode, PrevNode);
-    IT.reset(NextNode);
+    this->setNext(Prev, Next);
+    this->setPrev(Next, Prev);
+    IT = iterator(*Next);
     this->removeNodeFromList(Node);  // Notify traits that we removed a node...
 
     // Set the next/prev pointers of the current node to null.  This isn't
     // strictly required, but this catches errors where a node is removed from
     // an ilist (and potentially deleted) with iterators still pointing at it.
-    // When those iterators are incremented or decremented, they will assert on
-    // the null next/prev pointer instead of "usually working".
-    this->setNext(Node, nullptr);
-    this->setPrev(Node, nullptr);
+    // After those iterators are incremented or decremented, they become
+    // default-constructed iterators, and will assert on increment, decrement,
+    // and dereference instead of "usually working".
+    this->setNext(Base, nullptr);
+    this->setPrev(Base, nullptr);
     return Node;
   }
 
@@ -505,12 +430,7 @@ public:
   ///
   /// This should only be used immediately before freeing nodes in bulk to
   /// avoid traversing the list and bringing all the nodes into cache.
-  void clearAndLeakNodesUnsafely() {
-    if (Head) {
-      Head = getTail();
-      this->setPrev(Head, Head);
-    }
-  }
+  void clearAndLeakNodesUnsafely() { Sentinel.reset(); }
 
 private:
   // transfer - The heart of the splice function.  Move linked list nodes from
@@ -519,48 +439,34 @@ private:
   void transfer(iterator position, iplist &L2, iterator first, iterator last) {
     assert(first != last && "Should be checked by callers");
     // Position cannot be contained in the range to be transferred.
-    // Check for the most common mistake.
     assert(position != first &&
+           // Check for the most common mistake.
            "Insertion point can't be one of the transferred nodes");
 
-    if (position != last) {
-      // Note: we have to be careful about the case when we move the first node
-      // in the list.  This node is the list sentinel node and we can't move it.
-      NodeTy *ThisSentinel = getTail();
-      setTail(nullptr);
-      NodeTy *L2Sentinel = L2.getTail();
-      L2.setTail(nullptr);
+    if (position == last)
+      return;
 
-      // Remove [first, last) from its old position.
-      NodeTy *First = &*first, *Prev = this->getPrev(First);
-      NodeTy *Next = last.getNodePtrUnchecked(), *Last = this->getPrev(Next);
-      if (Prev)
-        this->setNext(Prev, Next);
-      else
-        L2.Head = Next;
-      this->setPrev(Next, Prev);
+    // Get raw hooks to the first and final nodes being transferred.
+    node_type *First = first.getNodePtr();
+    node_type *Final = (--last).getNodePtr();
 
-      // Splice [first, last) into its new position.
-      NodeTy *PosNext = position.getNodePtrUnchecked();
-      NodeTy *PosPrev = this->getPrev(PosNext);
+    // Detach from old list/position.
+    node_type *Prev = this->getPrev(First);
+    node_type *Next = this->getNext(Final);
+    this->setNext(Prev, Next);
+    this->setPrev(Next, Prev);
 
-      // Fix head of list...
-      if (PosPrev)
-        this->setNext(PosPrev, First);
-      else
-        Head = First;
-      this->setPrev(First, PosPrev);
+    // Splice [First, Final] into its new list/position.
+    Next = position.getNodePtr();
+    Prev = this->getPrev(Next);
+    this->setNext(Final, Next);
+    this->setPrev(First, Prev);
+    this->setNext(Prev, First);
+    this->setPrev(Next, Final);
 
-      // Fix end of list...
-      this->setNext(Last, PosNext);
-      this->setPrev(PosNext, Last);
-
-      this->transferNodesFromList(L2, iterator(First), iterator(PosNext));
-
-      // Now that everything is set, restore the pointers to the list sentinels.
-      L2.setTail(L2Sentinel);
-      setTail(ThisSentinel);
-    }
+    // Callback.  Note that the nodes have moved from before-last to
+    // before-position.
+    this->transferNodesFromList(L2, first, position);
   }
 
 public:
@@ -570,7 +476,6 @@ public:
   //
 
   size_type LLVM_ATTRIBUTE_UNUSED_RESULT size() const {
-    if (!Head) return 0; // Don't require construction of sentinel if empty.
     return std::distance(begin(), end());
   }
 
@@ -580,7 +485,7 @@ public:
     return last;
   }
 
-  void clear() { if (Head) erase(begin(), end()); }
+  void clear() { erase(begin(), end()); }
 
   // Front and back inserters...
   void push_front(NodeTy *val) { insert(begin(), val); }
