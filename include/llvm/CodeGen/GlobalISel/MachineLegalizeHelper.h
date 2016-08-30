@@ -55,8 +55,14 @@ public:
   ///
   /// Considered as an opaque blob, the legal code will use and define the same
   /// registers as \p MI.
+  LegalizeResult legalizeInstrStep(MachineInstr &MI,
+                                   const MachineLegalizer &Legalizer);
+
   LegalizeResult legalizeInstr(MachineInstr &MI,
                                const MachineLegalizer &Legalizer);
+
+  /// Legalize an instruction by emiting a runtime library call instead.
+  LegalizeResult libcall(MachineInstr &MI);
 
   /// Legalize an instruction by reducing the width of the underlying scalar
   /// type.
@@ -66,6 +72,10 @@ public:
   /// (for example a 16-bit addition can be safely performed at 32-bits
   /// precision, ignoring the unused bits).
   LegalizeResult widenScalar(MachineInstr &MI, unsigned TypeIdx, LLT WideTy);
+
+  /// Legalize an instruction by splitting it into simpler parts, hopefully
+  /// understood by the target.
+  LegalizeResult lower(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
   /// Legalize a vector instruction by splitting into multiple components, each
   /// acting on the same scalar type as the original but with fewer elements.
