@@ -208,9 +208,6 @@ namespace {
     void visitMachineBasicBlockAfter(const MachineBasicBlock *MBB);
     void visitMachineFunctionAfter();
 
-    template <typename T> void report(const char *msg, ilist_iterator<T> I) {
-      report(msg, &*I);
-    }
     void report(const char *msg, const MachineFunction *MF);
     void report(const char *msg, const MachineBasicBlock *MBB);
     void report(const char *msg, const MachineInstr *MI);
@@ -365,7 +362,7 @@ unsigned MachineVerifier::verify(MachineFunction &MF) {
     for (MachineBasicBlock::const_instr_iterator MBBI = MFI->instr_begin(),
            MBBE = MFI->instr_end(); MBBI != MBBE; ++MBBI) {
       if (MBBI->getParent() != &*MFI) {
-        report("Bad instruction parent pointer", MFI);
+        report("Bad instruction parent pointer", &*MFI);
         errs() << "Instruction: " << *MBBI;
         continue;
       }
@@ -387,7 +384,7 @@ unsigned MachineVerifier::verify(MachineFunction &MF) {
         CurBundle = &*MBBI;
         visitMachineBundleBefore(CurBundle);
       } else if (!CurBundle)
-        report("No bundle header", MBBI);
+        report("No bundle header", &*MBBI);
       visitMachineInstrBefore(&*MBBI);
       for (unsigned I = 0, E = MBBI->getNumOperands(); I != E; ++I) {
         const MachineInstr &MI = *MBBI;
@@ -900,6 +897,15 @@ void MachineVerifier::visitMachineInstrBefore(const MachineInstr *MI) {
   } else {
     if (NumTypes != 0)
       report("Non-generic instruction cannot have a type", MI);
+  }
+
+  // Generic opcodes must not have physical register operands.
+  if (isPreISelGenericOpcode(MCID.getOpcode()) &&
+      MCID.getOpcode() != TargetOpcode::G_TYPE) {
+    for (auto &Op : MI->operands()) {
+      if (Op.isReg() && TargetRegisterInfo::isPhysicalRegister(Op.getReg()))
+        report("Generic instruction cannot have physical register", MI);
+    }
   }
 
   StringRef ErrorInfo;
