@@ -4176,7 +4176,7 @@ void X86InstrInfo::replaceBranchWithTailCall(
   MIB->addOperand(TailCall.getOperand(0)); // Destination.
   MIB.addImm(0); // Stack offset (not used).
   MIB->addOperand(BranchCond[0]); // Condition.
-  MIB->addOperand(TailCall.getOperand(2)); // Regmask.
+  MIB.copyImplicitOps(TailCall); // Regmask and (imp-used) parameters.
 
   I->eraseFromParent();
 }
@@ -4441,7 +4441,10 @@ bool X86InstrInfo::analyzeBranchPredicate(MachineBasicBlock &MBB,
   return true;
 }
 
-unsigned X86InstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
+unsigned X86InstrInfo::RemoveBranch(MachineBasicBlock &MBB,
+                                    int *BytesRemoved) const {
+  assert(!BytesRemoved && "code size not handled");
+
   MachineBasicBlock::iterator I = MBB.end();
   unsigned Count = 0;
 
@@ -4461,15 +4464,17 @@ unsigned X86InstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
   return Count;
 }
 
-unsigned X86InstrInfo::InsertBranch(MachineBasicBlock &MBB,
+unsigned X86InstrInfo::insertBranch(MachineBasicBlock &MBB,
                                     MachineBasicBlock *TBB,
                                     MachineBasicBlock *FBB,
                                     ArrayRef<MachineOperand> Cond,
-                                    const DebugLoc &DL) const {
+                                    const DebugLoc &DL,
+                                    int *BytesAdded) const {
   // Shouldn't be a fall through.
-  assert(TBB && "InsertBranch must not be told to insert a fallthrough");
+  assert(TBB && "insertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 1 || Cond.size() == 0) &&
          "X86 branch conditions have one component!");
+  assert(!BytesAdded && "code size not handled");
 
   if (Cond.empty()) {
     // Unconditional branch?
@@ -5349,9 +5354,9 @@ bool X86InstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   // If the definition is in this basic block, RE points to the definition;
   // otherwise, RE is the rend of the basic block.
   MachineBasicBlock::reverse_iterator
-      RI = MachineBasicBlock::reverse_iterator(I),
+      RI = ++I.getReverse(),
       RE = CmpInstr.getParent() == MI->getParent()
-               ? MachineBasicBlock::reverse_iterator(++Def) /* points to MI */
+               ? Def.getReverse() /* points to MI */
                : CmpInstr.getParent()->rend();
   MachineInstr *Movr0Inst = nullptr;
   for (; RI != RE; ++RI) {
@@ -5497,9 +5502,8 @@ bool X86InstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   if (Movr0Inst) {
     // Look backwards until we find a def that doesn't use the current EFLAGS.
     Def = Sub;
-    MachineBasicBlock::reverse_iterator
-      InsertI = MachineBasicBlock::reverse_iterator(++Def),
-                InsertE = Sub->getParent()->rend();
+    MachineBasicBlock::reverse_iterator InsertI = Def.getReverse(),
+                                        InsertE = Sub->getParent()->rend();
     for (; InsertI != InsertE; ++InsertI) {
       MachineInstr *Instr = &*InsertI;
       if (!Instr->readsRegister(X86::EFLAGS, TRI) &&

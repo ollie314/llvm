@@ -121,8 +121,6 @@ public:
     return ilist_iterator<OptionsT, IsReverse, false>();
   }
 
-  void reset(pointer NP) { NodePtr = NP; }
-
   // Accessors...
   reference operator*() const {
     assert(!NodePtr->isKnownSentinel());
@@ -160,6 +158,9 @@ public:
 
   /// Get the underlying ilist_node.
   node_pointer getNodePtr() const { return static_cast<node_pointer>(NodePtr); }
+
+  /// Check for end.  Only valid if ilist_sentinel_tracking<true>.
+  bool isEnd() const { return NodePtr ? NodePtr->isSentinel() : false; }
 };
 
 template <typename From> struct simplify_type;
