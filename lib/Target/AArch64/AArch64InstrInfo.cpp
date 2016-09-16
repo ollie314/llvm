@@ -257,7 +257,7 @@ bool AArch64InstrInfo::analyzeBranch(MachineBasicBlock &MBB,
   return true;
 }
 
-bool AArch64InstrInfo::ReverseBranchCondition(
+bool AArch64InstrInfo::reverseBranchCondition(
     SmallVectorImpl<MachineOperand> &Cond) const {
   if (Cond[0].getImm() != -1) {
     // Regular Bcc
@@ -298,7 +298,7 @@ bool AArch64InstrInfo::ReverseBranchCondition(
   return false;
 }
 
-unsigned AArch64InstrInfo::RemoveBranch(MachineBasicBlock &MBB,
+unsigned AArch64InstrInfo::removeBranch(MachineBasicBlock &MBB,
                                         int *BytesRemoved) const {
   MachineBasicBlock::iterator I = MBB.getLastNonDebugInstr();
   if (I == MBB.end())
@@ -2901,6 +2901,8 @@ static bool isCombineInstrCandidate64(unsigned Opc) {
 // FP Opcodes that can be combined with a FMUL
 static bool isCombineInstrCandidateFP(const MachineInstr &Inst) {
   switch (Inst.getOpcode()) {
+  default:
+    break;
   case AArch64::FADDSrr:
   case AArch64::FADDDrr:
   case AArch64::FADDv2f32:
@@ -2911,9 +2913,9 @@ static bool isCombineInstrCandidateFP(const MachineInstr &Inst) {
   case AArch64::FSUBv2f32:
   case AArch64::FSUBv2f64:
   case AArch64::FSUBv4f32:
-    return Inst.getParent()->getParent()->getTarget().Options.UnsafeFPMath;
-  default:
-    break;
+		TargetOptions Options = Inst.getParent()->getParent()->getTarget().Options; 
+    return (Options.UnsafeFPMath || 
+				    Options.AllowFPOpFusion == FPOpFusion::Fast);
   }
   return false;
 }
