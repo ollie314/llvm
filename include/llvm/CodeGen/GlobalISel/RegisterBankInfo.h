@@ -109,7 +109,8 @@ public:
     /// Cost of this mapping.
     unsigned Cost;
     /// Mapping of all the operands.
-    std::unique_ptr<ValueMapping[]> OperandsMapping;
+    /// Note: Use a SmallVector to avoid heap allocation in most cases.
+    SmallVector<ValueMapping, 8> OperandsMapping;
     /// Number of operands.
     unsigned NumOperands;
 
@@ -131,7 +132,7 @@ public:
         : ID(ID), Cost(Cost), NumOperands(NumOperands) {
       assert(getID() != InvalidMappingID &&
              "Use the default constructor for invalid mapping");
-      OperandsMapping.reset(new ValueMapping[getNumOperands()]);
+      OperandsMapping.resize(getNumOperands());
     }
 
     /// Default constructor.
@@ -193,7 +194,8 @@ public:
   class OperandsMapper {
     /// The OpIdx-th cell contains the index in NewVRegs where the VRegs of the
     /// OpIdx-th operand starts. -1 means we do not have such mapping yet.
-    std::unique_ptr<int[]> OpToNewVRegIdx;
+    /// Note: We use a SmallVector to avoid heap allocation for most cases.
+    SmallVector<int, 8> OpToNewVRegIdx;
     /// Hold the registers that will be used to map MI with InstrMapping.
     SmallVector<unsigned, 8> NewVRegs;
     /// Current MachineRegisterInfo, used to create new virtual registers.
@@ -287,7 +289,7 @@ public:
 
 protected:
   /// Hold the set of supported register banks.
-  std::unique_ptr<RegisterBank[]> RegBanks;
+  RegisterBank **RegBanks;
   /// Total number of register banks.
   unsigned NumRegBanks;
 
@@ -297,7 +299,7 @@ protected:
   /// \note For the verify method to succeed all the \p NumRegBanks
   /// must be initialized by createRegisterBank and updated with
   /// addRegBankCoverage RegisterBank.
-  RegisterBankInfo(unsigned NumRegBanks);
+  RegisterBankInfo(RegisterBank **RegBanks, unsigned NumRegBanks);
 
   /// This constructor is meaningless.
   /// It just provides a default constructor that can be used at link time
@@ -337,7 +339,7 @@ protected:
   /// Get the register bank identified by \p ID.
   RegisterBank &getRegBank(unsigned ID) {
     assert(ID < getNumRegBanks() && "Accessing an unknown register bank");
-    return RegBanks[ID];
+    return *RegBanks[ID];
   }
 
   /// Try to get the mapping of \p MI.

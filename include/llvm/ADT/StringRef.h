@@ -68,6 +68,8 @@ namespace llvm {
     /// Construct an empty string ref.
     /*implicit*/ StringRef() : Data(nullptr), Length(0) {}
 
+    StringRef(std::nullptr_t) = delete;
+
     /// Construct a string ref from a cstring.
     /*implicit*/ StringRef(const char *Str)
       : Data(Str) {
@@ -87,6 +89,10 @@ namespace llvm {
     LLVM_ATTRIBUTE_ALWAYS_INLINE
     /*implicit*/ StringRef(const std::string &Str)
       : Data(Str.data()), Length(Str.length()) {}
+
+    static StringRef withNullAsEmpty(const char *data) {
+      return StringRef(data ? data : "");
+    }
 
     /// @}
     /// @name Iterators

@@ -30,21 +30,28 @@ class AArch64CallLowering: public CallLowering {
   bool lowerReturn(MachineIRBuilder &MIRBuiler, const Value *Val,
                    unsigned VReg) const override;
 
-  bool lowerFormalArguments(MachineIRBuilder &MIRBuilder,
-                            const Function::ArgumentListType &Args,
+  bool lowerFormalArguments(MachineIRBuilder &MIRBuilder, const Function &F,
                             ArrayRef<unsigned> VRegs) const override;
 
   bool lowerCall(MachineIRBuilder &MIRBuilder, const MachineOperand &Callee,
-                 ArrayRef<Type *> ResTys, ArrayRef<unsigned> ResRegs,
-                 ArrayRef<Type *> ArgTys,
-                 ArrayRef<unsigned> ArgRegs) const override;
+                 const ArgInfo &OrigRet,
+                 ArrayRef<ArgInfo> OrigArgs) const override;
 
 private:
-  typedef std::function<void(MachineIRBuilder &, Type *, unsigned, unsigned)>
+  typedef std::function<void(MachineIRBuilder &, Type *, unsigned,
+                             CCValAssign &)>
       AssignFnTy;
 
+  typedef std::function<void(ArrayRef<unsigned>, ArrayRef<uint64_t>)>
+      SplitArgTy;
+
+  void splitToValueTypes(const ArgInfo &OrigArgInfo,
+                         SmallVectorImpl<ArgInfo> &SplitArgs,
+                         const DataLayout &DL, MachineRegisterInfo &MRI,
+                         SplitArgTy SplitArg) const;
+
   bool handleAssignments(MachineIRBuilder &MIRBuilder, CCAssignFn *AssignFn,
-                         ArrayRef<Type *> ArgsTypes, ArrayRef<unsigned> ArgRegs,
+                         ArrayRef<ArgInfo> Args,
                          AssignFnTy AssignValToReg) const;
 };
 } // End of namespace llvm;

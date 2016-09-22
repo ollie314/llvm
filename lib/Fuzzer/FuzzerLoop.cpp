@@ -10,6 +10,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "FuzzerInternal.h"
+#include "FuzzerCorpus.h"
+#include "FuzzerMutate.h"
+#include "FuzzerTracePC.h"
+#include "FuzzerRandom.h"
+
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -63,7 +68,7 @@ void Fuzzer::ResetCounters() {
   }
   if (EF->__sanitizer_get_coverage_pc_buffer_pos)
     PcBufferPos = EF->__sanitizer_get_coverage_pc_buffer_pos();
-  TPC.GetNewPCsAndFlush();
+  TPC.ResetNewPCIDs();
 }
 
 void Fuzzer::PrepareCounters(Fuzzer::Coverage *C) {
@@ -106,7 +111,6 @@ bool Fuzzer::RecordMaxCoverage(Fuzzer::Coverage *C) {
       Res = true;
       C->CounterBitmapBits += CounterDelta;
     }
-
   }
 
   size_t NewVPMapBits = VPMapMergeFromCurrent(C->VPMap);
@@ -153,8 +157,9 @@ void FreeHook(const volatile void *ptr) {
   AllocTracer.Frees++;
 }
 
-Fuzzer::Fuzzer(UserCallback CB, MutationDispatcher &MD, FuzzingOptions Options)
-    : CB(CB), MD(MD), Options(Options) {
+Fuzzer::Fuzzer(UserCallback CB, InputCorpus &Corpus, MutationDispatcher &MD,
+               FuzzingOptions Options)
+    : CB(CB), Corpus(Corpus), MD(MD), Options(Options) {
   SetDeathCallback();
   InitializeTraceState();
   assert(!F);
@@ -170,6 +175,10 @@ Fuzzer::Fuzzer(UserCallback CB, MutationDispatcher &MD, FuzzingOptions Options)
     PcBuffer = new uintptr_t[PcBufferLen];
     EF->__sanitizer_set_coverage_pc_buffer(PcBuffer, PcBufferLen);
   }
+  if (Options.Verbosity)
+    TPC.PrintModuleInfo();
+  if (!Options.OutputCorpus.empty() && Options.Reload)
+    EpochOfLastReadOfOutputCorpus = GetEpoch(Options.OutputCorpus);
 }
 
 Fuzzer::~Fuzzer() { }
@@ -327,6 +336,10 @@ void Fuzzer::PrintStats(const char *Where, const char *End) {
 }
 
 void Fuzzer::PrintFinalStats() {
+  if (Options.PrintCoverage)
+    TPC.PrintCoverage();
+  if (Options.PrintCorpusStats)
+    Corpus.PrintStats();
   if (!Options.PrintFinalStats) return;
   size_t ExecPerSec = execPerSec();
   Printf("stat::number_of_executed_units: %zd\n", TotalNumberOfRuns);
@@ -336,13 +349,6 @@ void Fuzzer::PrintFinalStats() {
   Printf("stat::peak_rss_mb:              %zd\n", GetPeakRSSMb());
 }
 
-size_t Fuzzer::MaxUnitSizeInCorpus() const {
-  size_t Res = 0;
-  for (auto &X : Corpus)
-    Res = std::max(Res, X.size());
-  return Res;
-}
-
 void Fuzzer::SetMaxLen(size_t MaxLen) {
   assert(Options.MaxLen == 0); // Can only reset MaxLen from 0 to non-0.
   assert(MaxLen);
@@ -350,28 +356,21 @@ void Fuzzer::SetMaxLen(size_t MaxLen) {
   Printf("INFO: -max_len is not provided, using %zd\n", Options.MaxLen);
 }
 
-
 void Fuzzer::RereadOutputCorpus(size_t MaxSize) {
-  if (Options.OutputCorpus.empty())
-    return;
+  if (Options.OutputCorpus.empty() || !Options.Reload) return;
   std::vector<Unit> AdditionalCorpus;
   ReadDirToVectorOfUnits(Options.OutputCorpus.c_str(), &AdditionalCorpus,
                          &EpochOfLastReadOfOutputCorpus, MaxSize);
-  if (Corpus.empty()) {
-    Corpus = AdditionalCorpus;
-    return;
-  }
-  if (!Options.Reload)
-    return;
   if (Options.Verbosity >= 2)
     Printf("Reload: read %zd new units.\n", AdditionalCorpus.size());
   for (auto &X : AdditionalCorpus) {
     if (X.size() > MaxSize)
       X.resize(MaxSize);
-    if (UnitHashesAddedToCorpus.insert(Hash(X)).second) {
+    if (!Corpus.HasUnit(X)) {
       if (RunOne(X)) {
-        Corpus.push_back(X);
-        UpdateCorpusDistribution();
+        uintptr_t *NewPCIDs;
+        size_t NumNewPCIDs = TPC.GetNewPCIDs(&NewPCIDs);
+        Corpus.AddToCorpus(X, NewPCIDs, NumNewPCIDs);
         PrintStats("RELOAD");
       }
     }
@@ -386,51 +385,23 @@ void Fuzzer::ShuffleCorpus(UnitVector *V) {
     });
 }
 
-// Tries random prefixes of corpus items.
-void Fuzzer::TruncateUnits(std::vector<Unit> *NewCorpus) {
-  std::vector<double> Fractions = {0.25, 0.5, 0.75, 1.0};
-
-  size_t TruncInputs = 0;
-  for (double Fraction : Fractions) {
-    for (const auto &U : Corpus) {
-      uint64_t S = MD.GetRand()(U.size() * Fraction);
-      if (!S || !RunOne(U.data(), S))
-        continue;
-      TruncInputs++;
-      Unit U1(U.begin(), U.begin() + S);
-      NewCorpus->push_back(U1);
-    }
-  }
-  if (TruncInputs)
-    Printf("\tINFO   TRUNC %zd units added to in-memory corpus\n", TruncInputs);
-}
-
-void Fuzzer::ShuffleAndMinimize() {
-  PrintStats("READ  ");
-  std::vector<Unit> NewCorpus;
+void Fuzzer::ShuffleAndMinimize(UnitVector *InitialCorpus) {
+  Printf("#0\tREAD units: %zd\n", InitialCorpus->size());
   if (Options.ShuffleAtStartUp)
-    ShuffleCorpus(&Corpus);
+    ShuffleCorpus(InitialCorpus);
 
-  if (Options.TruncateUnits) {
-    ResetCoverage();
-    TruncateUnits(&NewCorpus);
-    ResetCoverage();
-  }
-
-  for (const auto &U : Corpus) {
+  for (const auto &U : *InitialCorpus) {
     bool NewCoverage = RunOne(U);
     if (!Options.PruneCorpus || NewCoverage) {
-      NewCorpus.push_back(U);
+      uintptr_t *NewPCIDs;
+      size_t NumNewPCIDs = TPC.GetNewPCIDs(&NewPCIDs);
+      Corpus.AddToCorpus(U, NewPCIDs, NumNewPCIDs);
       if (Options.Verbosity >= 2)
         Printf("NEW0: %zd L %zd\n", MaxCoverage.BlockCoverage, U.size());
     }
     TryDetectingAMemoryLeak(U.data(), U.size(),
                             /*DuringInitialCorpusExecution*/ true);
   }
-  Corpus = NewCorpus;
-  UpdateCorpusDistribution();
-  for (auto &X : Corpus)
-    UnitHashesAddedToCorpus.insert(Hash(X));
   PrintStats("INITED");
   if (Corpus.empty()) {
     Printf("ERROR: no interesting inputs were found. "
@@ -452,26 +423,18 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size) {
   ExecuteCallback(Data, Size);
   bool Res = UpdateMaxCoverage();
 
-  auto UnitStopTime = system_clock::now();
   auto TimeOfUnit =
       duration_cast<seconds>(UnitStopTime - UnitStartTime).count();
   if (!(TotalNumberOfRuns & (TotalNumberOfRuns - 1)) &&
       secondsSinceProcessStartUp() >= 2)
     PrintStats("pulse ");
-  if (TimeOfUnit > TimeOfLongestUnitInSeconds &&
+  if (TimeOfUnit > TimeOfLongestUnitInSeconds * 1.1 &&
       TimeOfUnit >= Options.ReportSlowUnits) {
     TimeOfLongestUnitInSeconds = TimeOfUnit;
     Printf("Slowest unit: %zd s:\n", TimeOfLongestUnitInSeconds);
     WriteUnitToFileWithPrefix({Data, Data + Size}, "slow-unit-");
   }
   return Res;
-}
-
-void Fuzzer::RunOneAndUpdateCorpus(const uint8_t *Data, size_t Size) {
-  if (TotalNumberOfRuns >= Options.MaxNumberOfRuns)
-    return;
-  if (RunOne(Data, Size))
-    ReportNewCoverage({Data, Data + Size});
 }
 
 size_t Fuzzer::GetCurrentUnitInFuzzingThead(const uint8_t **Data) const {
@@ -483,7 +446,6 @@ size_t Fuzzer::GetCurrentUnitInFuzzingThead(const uint8_t **Data) const {
 void Fuzzer::ExecuteCallback(const uint8_t *Data, size_t Size) {
   assert(InFuzzingThread());
   LazyAllocateCurrentUnitData();
-  UnitStartTime = system_clock::now();
   // We copy the contents of Unit into a separate heap buffer
   // so that we reliably find buffer overflows in it.
   uint8_t *DataCopy = new uint8_t[Size];
@@ -493,12 +455,14 @@ void Fuzzer::ExecuteCallback(const uint8_t *Data, size_t Size) {
   AssignTaintLabels(DataCopy, Size);
   CurrentUnitSize = Size;
   AllocTracer.Start();
+  UnitStartTime = system_clock::now();
   ResetCounters();  // Reset coverage right before the callback.
   int Res = CB(DataCopy, Size);
+  UnitStopTime = system_clock::now();
   (void)Res;
+  assert(Res == 0);
   HasMoreMallocsThanFrees = AllocTracer.Stop();
   CurrentUnitSize = 0;
-  assert(Res == 0);
   delete[] DataCopy;
 }
 
@@ -536,16 +500,6 @@ void Fuzzer::WriteUnitToFileWithPrefix(const Unit &U, const char *Prefix) {
     Printf("Base64: %s\n", Base64(U).c_str());
 }
 
-void Fuzzer::SaveCorpus() {
-  if (Options.OutputCorpus.empty())
-    return;
-  for (const auto &U : Corpus)
-    WriteToFile(U, DirPlusFile(Options.OutputCorpus, Hash(U)));
-  if (Options.Verbosity)
-    Printf("Written corpus of %zd files to %s\n", Corpus.size(),
-           Options.OutputCorpus.c_str());
-}
-
 void Fuzzer::PrintStatusForNewUnit(const Unit &U) {
   if (!Options.PrintNEW)
     return;
@@ -558,15 +512,8 @@ void Fuzzer::PrintStatusForNewUnit(const Unit &U) {
 }
 
 void Fuzzer::PrintOneNewPC(uintptr_t PC) {
-  if (EF->__sanitizer_symbolize_pc) {
-    char PcDescr[1024];
-    EF->__sanitizer_symbolize_pc(reinterpret_cast<void*>(PC),
-                                 "%p %F %L", PcDescr, sizeof(PcDescr));
-    PcDescr[sizeof(PcDescr) - 1] = 0;  // Just in case.
-    Printf("\tNEW_PC: %s\n", PcDescr);
-  } else {
-    Printf("\tNEW_PC: %p\n", PC);
-  }
+  PrintPC("\tNEW_PC: %p %F %L\n",
+          "\tNEW_PC: %p\n", PC);
 }
 
 void Fuzzer::PrintNewPCs() {
@@ -578,16 +525,17 @@ void Fuzzer::PrintNewPCs() {
       PrintOneNewPC(PcBuffer[I]);
     }
   }
-  uintptr_t *PCs;
-  if (size_t NumNewPCs = TPC.GetNewPCsAndFlush(&PCs))
-    for (size_t i = 0; i < NumNewPCs; i++)
-      PrintOneNewPC(PCs[i]);
+  uintptr_t *PCIDs;
+  if (size_t NumNewPCIDs = TPC.GetNewPCIDs(&PCIDs))
+    for (size_t i = 0; i < NumNewPCIDs; i++)
+      PrintOneNewPC(TPC.GetPCbyPCID(PCIDs[i]));
 }
 
-void Fuzzer::ReportNewCoverage(const Unit &U) {
-  Corpus.push_back(U);
-  UpdateCorpusDistribution();
-  UnitHashesAddedToCorpus.insert(Hash(U));
+void Fuzzer::ReportNewCoverage(InputInfo *II, const Unit &U) {
+  II->NumSuccessfullMutations++;
+  uintptr_t *NewPCIDs;
+  size_t NumNewPCIDs = TPC.GetNewPCIDs(&NewPCIDs);
+  Corpus.AddToCorpus(U, NewPCIDs, NumNewPCIDs);
   MD.RecordSuccessfulMutationSequence();
   PrintStatusForNewUnit(U);
   WriteToOutputCorpus(U);
@@ -602,6 +550,7 @@ void Fuzzer::ReportNewCoverage(const Unit &U) {
 UnitVector Fuzzer::FindExtraUnits(const UnitVector &Initial,
                                   const UnitVector &Extra) {
   UnitVector Res = Extra;
+  UnitVector Tmp;
   size_t OldSize = Res.size();
   for (int Iter = 0; Iter < 10; Iter++) {
     ShuffleCorpus(&Res);
@@ -610,18 +559,18 @@ UnitVector Fuzzer::FindExtraUnits(const UnitVector &Initial,
     for (auto &U : Initial)
       RunOne(U);
 
-    Corpus.clear();
+    Tmp.clear();
     for (auto &U : Res)
       if (RunOne(U))
-        Corpus.push_back(U);
+        Tmp.push_back(U);
 
     char Stat[7] = "MIN   ";
     Stat[3] = '0' + Iter;
     PrintStats(Stat);
 
-    size_t NewSize = Corpus.size();
+    size_t NewSize = Tmp.size();
     assert(NewSize <= OldSize);
-    Res.swap(Corpus);
+    Res.swap(Tmp);
 
     if (NewSize + 5 >= OldSize)
       break;
@@ -699,91 +648,40 @@ void Fuzzer::MutateAndTestOne() {
   LazyAllocateCurrentUnitData();
   MD.StartMutationSequence();
 
-  auto &U = ChooseUnitToMutate();
-  ComputeSHA1(U.data(), U.size(), BaseSha1);  // Remember where we started.
+  auto &II = Corpus.ChooseUnitToMutate(MD.GetRand());
+  const auto &U = II.U;
+  memcpy(BaseSha1, II.Sha1, sizeof(BaseSha1));
   assert(CurrentUnitData);
   size_t Size = U.size();
   assert(Size <= Options.MaxLen && "Oversized Unit");
   memcpy(CurrentUnitData, U.data(), Size);
 
+  size_t MaxLen = Options.MaxLen;
+
   for (int i = 0; i < Options.MutateDepth; i++) {
+    if (TotalNumberOfRuns >= Options.MaxNumberOfRuns)
+      break;
     size_t NewSize = 0;
-    NewSize = MD.Mutate(CurrentUnitData, Size, Options.MaxLen);
+    NewSize = MD.Mutate(CurrentUnitData, Size, MaxLen);
     assert(NewSize > 0 && "Mutator returned empty unit");
-    assert(NewSize <= Options.MaxLen &&
-           "Mutator return overisized unit");
+    assert(NewSize <= MaxLen && "Mutator return overisized unit");
     Size = NewSize;
     if (i == 0)
       StartTraceRecording();
-    RunOneAndUpdateCorpus(CurrentUnitData, Size);
+    II.NumExecutedMutations++;
+    if (RunOne(CurrentUnitData, Size))
+      ReportNewCoverage(&II, {CurrentUnitData, CurrentUnitData + Size});
     StopTraceRecording();
     TryDetectingAMemoryLeak(CurrentUnitData, Size,
                             /*DuringInitialCorpusExecution*/ false);
   }
 }
 
-// Returns an index of random unit from the corpus to mutate.
-// Hypothesis: units added to the corpus last are more likely to be interesting.
-// This function gives more weight to the more recent units.
-size_t Fuzzer::ChooseUnitIdxToMutate() {
-  size_t Idx =
-      static_cast<size_t>(CorpusDistribution(MD.GetRand().Get_mt19937()));
-  assert(Idx < Corpus.size());
-  return Idx;
-}
-
 void Fuzzer::ResetCoverage() {
   ResetEdgeCoverage();
   MaxCoverage.Reset();
+  TPC.Reset();
   PrepareCounters(&MaxCoverage);
-}
-
-// Experimental search heuristic: drilling.
-// - Read, shuffle, execute and minimize the corpus.
-// - Choose one random unit.
-// - Reset the coverage.
-// - Start fuzzing as if the chosen unit was the only element of the corpus.
-// - When done, reset the coverage again.
-// - Merge the newly created corpus into the original one.
-void Fuzzer::Drill() {
-  // The corpus is already read, shuffled, and minimized.
-  assert(!Corpus.empty());
-  Options.PrintNEW = false; // Don't print NEW status lines when drilling.
-
-  Unit U = ChooseUnitToMutate();
-
-  ResetCoverage();
-
-  std::vector<Unit> SavedCorpus;
-  SavedCorpus.swap(Corpus);
-  Corpus.push_back(U);
-  UpdateCorpusDistribution();
-  assert(Corpus.size() == 1);
-  RunOne(U);
-  PrintStats("DRILL ");
-  std::string SavedOutputCorpusPath; // Don't write new units while drilling.
-  SavedOutputCorpusPath.swap(Options.OutputCorpus);
-  Loop();
-
-  ResetCoverage();
-
-  PrintStats("REINIT");
-  SavedOutputCorpusPath.swap(Options.OutputCorpus);
-  for (auto &U : SavedCorpus)
-    RunOne(U);
-  PrintStats("MERGE ");
-  Options.PrintNEW = true;
-  size_t NumMerged = 0;
-  for (auto &U : Corpus) {
-    if (RunOne(U)) {
-      PrintStatusForNewUnit(U);
-      NumMerged++;
-      WriteToOutputCorpus(U);
-    }
-  }
-  PrintStats("MERGED");
-  if (NumMerged && Options.Verbosity)
-    Printf("Drilling discovered %zd new units\n", NumMerged);
 }
 
 void Fuzzer::Loop() {
@@ -808,16 +706,6 @@ void Fuzzer::Loop() {
 
   PrintStats("DONE  ", "\n");
   MD.PrintRecommendedDictionary();
-}
-
-void Fuzzer::UpdateCorpusDistribution() {
-  size_t N = Corpus.size();
-  std::vector<double> Intervals(N + 1);
-  std::vector<double> Weights(N);
-  std::iota(Intervals.begin(), Intervals.end(), 0);
-  std::iota(Weights.begin(), Weights.end(), 1);
-  CorpusDistribution = std::piecewise_constant_distribution<double>(
-      Intervals.begin(), Intervals.end(), Weights.begin());
 }
 
 } // namespace fuzzer

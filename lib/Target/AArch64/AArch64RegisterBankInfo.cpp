@@ -21,6 +21,9 @@
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 
+// This file will be TableGen'ed at some point.
+#include "AArch64GenRegisterBankInfo.def"
+
 using namespace llvm;
 
 #ifndef LLVM_BUILD_GLOBAL_ISEL
@@ -28,7 +31,16 @@ using namespace llvm;
 #endif
 
 AArch64RegisterBankInfo::AArch64RegisterBankInfo(const TargetRegisterInfo &TRI)
-    : RegisterBankInfo(AArch64::NumRegisterBanks) {
+    : RegisterBankInfo(AArch64::RegBanks, AArch64::NumRegisterBanks) {
+  static bool AlreadyInit = false;
+  // We have only one set of register banks, whatever the subtarget
+  // is. Therefore, the initialization of the RegBanks table should be
+  // done only once. Indeed the table of all register banks
+  // (AArch64::RegBanks) is unique in the compiler. At some point, it
+  // will get tablegen'ed and the whole constructor becomes empty.
+  if (AlreadyInit)
+    return;
+  AlreadyInit = true;
   // Initialize the GPR bank.
   createRegisterBank(AArch64::GPRRegBankID, "GPR");
   // The GPR register bank is fully defined by all the registers in
@@ -36,6 +48,8 @@ AArch64RegisterBankInfo::AArch64RegisterBankInfo(const TargetRegisterInfo &TRI)
   addRegBankCoverage(AArch64::GPRRegBankID, AArch64::GPR64allRegClassID, TRI);
   const RegisterBank &RBGPR = getRegBank(AArch64::GPRRegBankID);
   (void)RBGPR;
+  assert(&AArch64::GPRRegBank == &RBGPR &&
+         "The order in RegBanks is messed up");
   assert(RBGPR.covers(*TRI.getRegClass(AArch64::GPR32RegClassID)) &&
          "Subclass not added?");
   assert(RBGPR.getSize() == 64 && "GPRs should hold up to 64-bit");
@@ -47,6 +61,8 @@ AArch64RegisterBankInfo::AArch64RegisterBankInfo(const TargetRegisterInfo &TRI)
   addRegBankCoverage(AArch64::FPRRegBankID, AArch64::QQQQRegClassID, TRI);
   const RegisterBank &RBFPR = getRegBank(AArch64::FPRRegBankID);
   (void)RBFPR;
+  assert(&AArch64::FPRRegBank == &RBFPR &&
+         "The order in RegBanks is messed up");
   assert(RBFPR.covers(*TRI.getRegClass(AArch64::QQRegClassID)) &&
          "Subclass not added?");
   assert(RBFPR.covers(*TRI.getRegClass(AArch64::FPR64RegClassID)) &&
@@ -59,6 +75,8 @@ AArch64RegisterBankInfo::AArch64RegisterBankInfo(const TargetRegisterInfo &TRI)
   addRegBankCoverage(AArch64::CCRRegBankID, AArch64::CCRRegClassID, TRI);
   const RegisterBank &RBCCR = getRegBank(AArch64::CCRRegBankID);
   (void)RBCCR;
+  assert(&AArch64::CCRRegBank == &RBCCR &&
+         "The order in RegBanks is messed up");
   assert(RBCCR.covers(*TRI.getRegClass(AArch64::CCRRegClassID)) &&
          "Class not added?");
   assert(RBCCR.getSize() == 32 && "CCR should hold up to 32-bit");
@@ -157,7 +175,6 @@ AArch64RegisterBankInfo::getInstrAlternativeMappings(
 void AArch64RegisterBankInfo::applyMappingImpl(
     const OperandsMapper &OpdMapper) const {
   switch (OpdMapper.getMI().getOpcode()) {
-  case TargetOpcode::G_ADD:
   case TargetOpcode::G_OR: {
     // Those ID must match getInstrAlternativeMappings.
     assert((OpdMapper.getInstrMapping().getID() == 1 ||
@@ -170,27 +187,82 @@ void AArch64RegisterBankInfo::applyMappingImpl(
   }
 }
 
+/// Returns whether opcode \p Opc is a pre-isel generic floating-point opcode,
+/// having only floating-point operands.
+static bool isPreISelGenericFloatingPointOpcode(unsigned Opc) {
+  switch (Opc) {
+  case TargetOpcode::G_FADD:
+  case TargetOpcode::G_FSUB:
+  case TargetOpcode::G_FMUL:
+  case TargetOpcode::G_FDIV:
+  case TargetOpcode::G_FCONSTANT:
+  case TargetOpcode::G_FPEXT:
+  case TargetOpcode::G_FPTRUNC:
+    return true;
+  }
+  return false;
+}
+
 RegisterBankInfo::InstructionMapping
 AArch64RegisterBankInfo::getInstrMapping(const MachineInstr &MI) const {
-  RegisterBankInfo::InstructionMapping Mapping = getInstrMappingImpl(MI);
-  if (Mapping.isValid())
-    return Mapping;
+  const unsigned Opc = MI.getOpcode();
+  const MachineFunction &MF = *MI.getParent()->getParent();
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
 
-  // As a top-level guess, vectors go in FPRs, scalars in GPRs. Obviously this
-  // won't work for normal floating-point types (or NZCV). When such
-  // instructions exist we'll need to look at the MI's opcode.
-  auto &MRI = MI.getParent()->getParent()->getRegInfo();
-  LLT Ty = MRI.getType(MI.getOperand(0).getReg());
-  unsigned BankID;
-  if (Ty.isVector())
-    BankID = AArch64::FPRRegBankID;
-  else
-    BankID = AArch64::GPRRegBankID;
+  // Try the default logic for non-generic instructions that are either copies
+  // or already have some operands assigned to banks.
+  if (!isPreISelGenericOpcode(Opc)) {
+    RegisterBankInfo::InstructionMapping Mapping = getInstrMappingImpl(MI);
+    if (Mapping.isValid())
+      return Mapping;
+  }
 
-  Mapping = InstructionMapping{1, 1, MI.getNumOperands()};
-  int Size = Ty.isValid() ? Ty.getSizeInBits() : 0;
+  RegisterBankInfo::InstructionMapping Mapping =
+      InstructionMapping{DefaultMappingID, 1, MI.getNumOperands()};
+
+  // Track the size and bank of each register.  We don't do partial mappings.
+  SmallVector<unsigned, 4> OpSizes(MI.getNumOperands());
+  SmallVector<unsigned, 4> OpBanks(MI.getNumOperands());
+  for (unsigned Idx = 0; Idx < MI.getNumOperands(); ++Idx) {
+    auto &MO = MI.getOperand(Idx);
+    if (!MO.isReg())
+      continue;
+
+    LLT Ty = MRI.getType(MO.getReg());
+    OpSizes[Idx] = Ty.getSizeInBits();
+
+    // As a top-level guess, vectors go in FPRs, scalars and pointers in GPRs.
+    // For floating-point instructions, scalars go in FPRs.
+    if (Ty.isVector() || isPreISelGenericFloatingPointOpcode(Opc))
+      OpBanks[Idx] = AArch64::FPRRegBankID;
+    else
+      OpBanks[Idx] = AArch64::GPRRegBankID;
+  }
+
+  // Some of the floating-point instructions have mixed GPR and FPR operands:
+  // fine-tune the computed mapping.
+  switch (Opc) {
+  case TargetOpcode::G_SITOFP:
+  case TargetOpcode::G_UITOFP: {
+    OpBanks = {AArch64::FPRRegBankID, AArch64::GPRRegBankID};
+    break;
+  }
+  case TargetOpcode::G_FPTOSI:
+  case TargetOpcode::G_FPTOUI: {
+    OpBanks = {AArch64::GPRRegBankID, AArch64::FPRRegBankID};
+    break;
+  }
+  case TargetOpcode::G_FCMP: {
+    OpBanks = {AArch64::GPRRegBankID, /* Predicate */ 0, AArch64::FPRRegBankID,
+               AArch64::FPRRegBankID};
+    break;
+  }
+  }
+
+  // Finally construct the computed mapping.
   for (unsigned Idx = 0; Idx < MI.getNumOperands(); ++Idx)
-    Mapping.setOperandMapping(Idx, Size, getRegBank(BankID));
+    if (MI.getOperand(Idx).isReg())
+      Mapping.setOperandMapping(Idx, OpSizes[Idx], getRegBank(OpBanks[Idx]));
 
   return Mapping;
 }

@@ -38,9 +38,14 @@ const unsigned RegisterBankInfo::InvalidMappingID = UINT_MAX - 1;
 //------------------------------------------------------------------------------
 // RegisterBankInfo implementation.
 //------------------------------------------------------------------------------
-RegisterBankInfo::RegisterBankInfo(unsigned NumRegBanks)
-    : NumRegBanks(NumRegBanks) {
-  RegBanks.reset(new RegisterBank[NumRegBanks]);
+RegisterBankInfo::RegisterBankInfo(RegisterBank **RegBanks,
+                                   unsigned NumRegBanks)
+    : RegBanks(RegBanks), NumRegBanks(NumRegBanks) {
+  DEBUG(for (unsigned Idx = 0, End = getNumRegBanks(); Idx != End; ++Idx) {
+    assert(RegBanks[Idx] != nullptr && "Invalid RegisterBank");
+    assert(!RegBanks[Idx]->isValid() &&
+           "RegisterBank should be invalid before initialization");
+  });
 }
 
 bool RegisterBankInfo::verify(const TargetRegisterInfo &TRI) const {
@@ -390,7 +395,7 @@ void RegisterBankInfo::PartialMapping::dump() const {
 bool RegisterBankInfo::PartialMapping::verify() const {
   assert(RegBank && "Register bank not set");
   assert(Length && "Empty mapping");
-  assert((StartIdx < getHighBitIdx()) && "Overflow, switch to APInt?");
+  assert((StartIdx <= getHighBitIdx()) && "Overflow, switch to APInt?");
   // Check if the minimum width fits into RegBank.
   assert(RegBank->getSize() >= Length && "Register bank too small for Mask");
   return true;
@@ -513,9 +518,7 @@ RegisterBankInfo::OperandsMapper::OperandsMapper(
     MachineRegisterInfo &MRI)
     : MRI(MRI), MI(MI), InstrMapping(InstrMapping) {
   unsigned NumOpds = MI.getNumOperands();
-  OpToNewVRegIdx.reset(new int[NumOpds]);
-  std::fill(&OpToNewVRegIdx[0], &OpToNewVRegIdx[NumOpds],
-            OperandsMapper::DontKnowIdx);
+  OpToNewVRegIdx.resize(NumOpds, OperandsMapper::DontKnowIdx);
   assert(InstrMapping.verify(MI) && "Invalid mapping for MI");
 }
 

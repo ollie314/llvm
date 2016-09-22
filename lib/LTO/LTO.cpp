@@ -410,11 +410,15 @@ unsigned LTO::getMaxTasks() const {
 }
 
 Error LTO::run(AddOutputFn AddOutput) {
+  // Save the status of having a regularLTO combined module, as
+  // this is needed for generating the ThinLTO Task ID, and
+  // the CombinedModule will be moved at the end of runRegularLTO.
+  bool HasRegularLTO = RegularLTO.CombinedModule != nullptr;
   // Invoke regular LTO if there was a regular LTO module to start with.
-  if (RegularLTO.CombinedModule)
+  if (HasRegularLTO)
     if (auto E = runRegularLTO(AddOutput))
       return E;
-  return runThinLTO(AddOutput);
+  return runThinLTO(AddOutput, HasRegularLTO);
 }
 
 Error LTO::runRegularLTO(AddOutputFn AddOutput) {
@@ -605,6 +609,26 @@ ThinBackend lto::createInProcessThinBackend(unsigned ParallelismLevel) {
   };
 }
 
+// Given the original \p Path to an output file, replace any path
+// prefix matching \p OldPrefix with \p NewPrefix. Also, create the
+// resulting directory if it does not yet exist.
+std::string lto::getThinLTOOutputFile(const std::string &Path,
+                                      const std::string &OldPrefix,
+                                      const std::string &NewPrefix) {
+  if (OldPrefix.empty() && NewPrefix.empty())
+    return Path;
+  SmallString<128> NewPath(Path);
+  llvm::sys::path::replace_path_prefix(NewPath, OldPrefix, NewPrefix);
+  StringRef ParentPath = llvm::sys::path::parent_path(NewPath.str());
+  if (!ParentPath.empty()) {
+    // Make sure the new directory exists, creating it if necessary.
+    if (std::error_code EC = llvm::sys::fs::create_directories(ParentPath))
+      llvm::errs() << "warning: could not create directory '" << ParentPath
+                   << "': " << EC.message() << '\n';
+  }
+  return NewPath.str();
+}
+
 class WriteIndexesThinBackend : public ThinBackendProc {
   std::string OldPrefix, NewPrefix;
   bool ShouldEmitImportsFiles;
@@ -622,26 +646,6 @@ public:
         OldPrefix(OldPrefix), NewPrefix(NewPrefix),
         ShouldEmitImportsFiles(ShouldEmitImportsFiles),
         LinkedObjectsFileName(LinkedObjectsFileName) {}
-
-  /// Given the original \p Path to an output file, replace any path
-  /// prefix matching \p OldPrefix with \p NewPrefix. Also, create the
-  /// resulting directory if it does not yet exist.
-  std::string getThinLTOOutputFile(const std::string &Path,
-                                   const std::string &OldPrefix,
-                                   const std::string &NewPrefix) {
-    if (OldPrefix.empty() && NewPrefix.empty())
-      return Path;
-    SmallString<128> NewPath(Path);
-    llvm::sys::path::replace_path_prefix(NewPath, OldPrefix, NewPrefix);
-    StringRef ParentPath = llvm::sys::path::parent_path(NewPath.str());
-    if (!ParentPath.empty()) {
-      // Make sure the new directory exists, creating it if necessary.
-      if (std::error_code EC = llvm::sys::fs::create_directories(ParentPath))
-        llvm::errs() << "warning: could not create directory '" << ParentPath
-                     << "': " << EC.message() << '\n';
-    }
-    return NewPath.str();
-  }
 
   Error start(
       unsigned Task, MemoryBufferRef MBRef,
@@ -696,7 +700,7 @@ ThinBackend lto::createWriteIndexesThinBackend(std::string OldPrefix,
   };
 }
 
-Error LTO::runThinLTO(AddOutputFn AddOutput) {
+Error LTO::runThinLTO(AddOutputFn AddOutput, bool HasRegularLTO) {
   if (ThinLTO.ModuleMap.empty())
     return Error();
 
@@ -709,6 +713,16 @@ Error LTO::runThinLTO(AddOutputFn AddOutput) {
       ModuleToDefinedGVSummaries(ThinLTO.ModuleMap.size());
   ThinLTO.CombinedIndex.collectDefinedGVSummariesPerModule(
       ModuleToDefinedGVSummaries);
+  // Create entries for any modules that didn't have any GV summaries
+  // (either they didn't have any GVs to start with, or we suppressed
+  // generation of the summaries because they e.g. had inline assembly
+  // uses that couldn't be promoted/renamed on export). This is so
+  // InProcessThinBackend::start can still launch a backend thread, which
+  // is passed the map of summaries for the module, without any special
+  // handling for this case.
+  for (auto &Mod : ThinLTO.ModuleMap)
+    if (!ModuleToDefinedGVSummaries.count(Mod.first))
+      ModuleToDefinedGVSummaries.try_emplace(Mod.first);
 
   StringMap<FunctionImporter::ImportMapTy> ImportLists(
       ThinLTO.ModuleMap.size());
@@ -753,9 +767,8 @@ Error LTO::runThinLTO(AddOutputFn AddOutput) {
   // ParallelCodeGenParallelismLevel if an LTO module is present, as tasks 0
   // through ParallelCodeGenParallelismLevel-1 are reserved for parallel code
   // generation partitions.
-  unsigned Task = RegularLTO.CombinedModule
-                      ? RegularLTO.ParallelCodeGenParallelismLevel
-                      : 0;
+  unsigned Task =
+      HasRegularLTO ? RegularLTO.ParallelCodeGenParallelismLevel : 0;
   unsigned Partition = 1;
 
   for (auto &Mod : ThinLTO.ModuleMap) {
