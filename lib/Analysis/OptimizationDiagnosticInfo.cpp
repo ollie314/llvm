@@ -52,11 +52,20 @@ Optional<uint64_t> OptimizationRemarkEmitter::computeHotness(const Value *V) {
   return BFI->getBlockProfileCount(cast<BasicBlock>(V));
 }
 
-template <> struct yaml::MappingTraits<DiagnosticInfoOptimizationBase *> {
+namespace llvm {
+namespace yaml {
+
+template <> struct MappingTraits<DiagnosticInfoOptimizationBase *> {
   static void mapping(IO &io, DiagnosticInfoOptimizationBase *&OptDiag) {
     assert(io.outputting() && "input not yet implemented");
 
-    if (io.mapTag("!Missed", OptDiag->getKind() == DK_OptimizationRemarkMissed))
+    if (io.mapTag("!Passed", OptDiag->getKind() == DK_OptimizationRemark))
+      ;
+    else if (io.mapTag("!Missed",
+                       OptDiag->getKind() == DK_OptimizationRemarkMissed))
+      ;
+    else if (io.mapTag("!Analysis",
+                       OptDiag->getKind() == DK_OptimizationRemarkAnalysis))
       ;
     else
       llvm_unreachable("todo");
@@ -76,7 +85,7 @@ template <> struct yaml::MappingTraits<DiagnosticInfoOptimizationBase *> {
   }
 };
 
-template <> struct yaml::MappingTraits<DebugLoc> {
+template <> struct MappingTraits<DebugLoc> {
   static void mapping(IO &io, DebugLoc &DL) {
     assert(io.outputting() && "input not yet implemented");
 
@@ -93,8 +102,7 @@ template <> struct yaml::MappingTraits<DebugLoc> {
   static const bool flow = true;
 };
 
-template <>
-struct yaml::ScalarTraits<DiagnosticInfoOptimizationBase::Argument> {
+template <> struct ScalarTraits<DiagnosticInfoOptimizationBase::Argument> {
   static void output(const DiagnosticInfoOptimizationBase::Argument &Arg,
                      void *, llvm::raw_ostream &out) {
     out << Arg.Key << ": " << Arg.Val;
@@ -107,6 +115,9 @@ struct yaml::ScalarTraits<DiagnosticInfoOptimizationBase::Argument> {
 
   static bool mustQuote(StringRef) { return false; }
 };
+
+} // end namespace yaml
+} // end namespace llvm
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(DiagnosticInfoOptimizationBase::Argument)
 
@@ -136,8 +147,7 @@ void OptimizationRemarkEmitter::emitOptimizationRemark(const char *PassName,
                                                        const Value *V,
                                                        const Twine &Msg) {
   LLVMContext &Ctx = F->getContext();
-  Ctx.diagnose(DiagnosticInfoOptimizationRemark(PassName, *F, DLoc, Msg,
-                                                computeHotness(V)));
+  Ctx.diagnose(OptimizationRemark(PassName, *F, DLoc, Msg, computeHotness(V)));
 }
 
 void OptimizationRemarkEmitter::emitOptimizationRemark(const char *PassName,
@@ -151,8 +161,8 @@ void OptimizationRemarkEmitter::emitOptimizationRemarkMissed(
     const Twine &Msg, bool IsVerbose) {
   LLVMContext &Ctx = F->getContext();
   if (!IsVerbose || shouldEmitVerbose())
-    Ctx.diagnose(DiagnosticInfoOptimizationRemarkMissed(PassName, *F, DLoc, Msg,
-                                                        computeHotness(V)));
+    Ctx.diagnose(
+        OptimizationRemarkMissed(PassName, *F, DLoc, Msg, computeHotness(V)));
 }
 
 void OptimizationRemarkEmitter::emitOptimizationRemarkMissed(
@@ -166,8 +176,8 @@ void OptimizationRemarkEmitter::emitOptimizationRemarkAnalysis(
     const Twine &Msg, bool IsVerbose) {
   LLVMContext &Ctx = F->getContext();
   if (!IsVerbose || shouldEmitVerbose())
-    Ctx.diagnose(DiagnosticInfoOptimizationRemarkAnalysis(
-        PassName, *F, DLoc, Msg, computeHotness(V)));
+    Ctx.diagnose(
+        OptimizationRemarkAnalysis(PassName, *F, DLoc, Msg, computeHotness(V)));
 }
 
 void OptimizationRemarkEmitter::emitOptimizationRemarkAnalysis(
@@ -180,16 +190,16 @@ void OptimizationRemarkEmitter::emitOptimizationRemarkAnalysisFPCommute(
     const char *PassName, const DebugLoc &DLoc, const Value *V,
     const Twine &Msg) {
   LLVMContext &Ctx = F->getContext();
-  Ctx.diagnose(DiagnosticInfoOptimizationRemarkAnalysisFPCommute(
-      PassName, *F, DLoc, Msg, computeHotness(V)));
+  Ctx.diagnose(OptimizationRemarkAnalysisFPCommute(PassName, *F, DLoc, Msg,
+                                                   computeHotness(V)));
 }
 
 void OptimizationRemarkEmitter::emitOptimizationRemarkAnalysisAliasing(
     const char *PassName, const DebugLoc &DLoc, const Value *V,
     const Twine &Msg) {
   LLVMContext &Ctx = F->getContext();
-  Ctx.diagnose(DiagnosticInfoOptimizationRemarkAnalysisAliasing(
-      PassName, *F, DLoc, Msg, computeHotness(V)));
+  Ctx.diagnose(OptimizationRemarkAnalysisAliasing(PassName, *F, DLoc, Msg,
+                                                  computeHotness(V)));
 }
 
 void OptimizationRemarkEmitter::emitOptimizationRemarkAnalysisAliasing(
