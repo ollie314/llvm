@@ -146,19 +146,18 @@ X86RegisterInfo::getLargestLegalSuperClass(const TargetRegisterClass *RC,
       if (!Subtarget.hasVLX() && Super->getSize() == RC->getSize())
         return Super;
       break;
-    case X86::FR32XRegClassID:
-    case X86::FR64XRegClassID:
-      // If VLX isn't support we shouldn't inflate to these classes.
-      if (!Subtarget.hasVLX())
-        break;
-      // The VLX check above passed, AVX512 check below will pass.
-      LLVM_FALLTHROUGH;
     case X86::VR128XRegClassID:
     case X86::VR256XRegClassID:
+      // If VLX isn't support we shouldn't inflate to these classes.
+      if (Subtarget.hasVLX() && Super->getSize() == RC->getSize())
+        return Super;
+      break;
+    case X86::FR32XRegClassID:
+    case X86::FR64XRegClassID:
       // If AVX-512 isn't support we shouldn't inflate to these classes.
-      if (!Subtarget.hasAVX512())
-        break;
-      LLVM_FALLTHROUGH;
+      if (Subtarget.hasAVX512() && Super->getSize() == RC->getSize())
+        return Super;
+      break;
     case X86::GR8RegClassID:
     case X86::GR16RegClassID:
     case X86::GR32RegClassID:
@@ -669,12 +668,14 @@ X86RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   // For LEA64_32r when BasePtr is 32-bits (X32) we can use full-size 64-bit
   // register as source operand, semantic is the same and destination is
   // 32-bits. It saves one byte per lea in code since 0x67 prefix is avoided.
+  // Don't change BasePtr since it is used later for stack adjustment.
+  unsigned MachineBasePtr = BasePtr;
   if (Opc == X86::LEA64_32r && X86::GR32RegClass.contains(BasePtr))
-    BasePtr = getX86SubSuperRegister(BasePtr, 64);
+    MachineBasePtr = getX86SubSuperRegister(BasePtr, 64);
 
   // This must be part of a four operand memory reference.  Replace the
-  // FrameIndex with base register with EBP.  Add an offset to the offset.
-  MI.getOperand(FIOperandNum).ChangeToRegister(BasePtr, false);
+  // FrameIndex with base register.  Add an offset to the offset.
+  MI.getOperand(FIOperandNum).ChangeToRegister(MachineBasePtr, false);
 
   // Now add the frame object offset to the offset from EBP.
   int FIOffset;

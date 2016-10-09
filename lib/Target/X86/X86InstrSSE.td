@@ -6906,10 +6906,10 @@ let Constraints = "$src1 = $dst" in {
 
 let Predicates = [HasAVX, NoVLX] in {
   defm VPMULLD  : SS48I_binop_rm<0x40, "vpmulld", mul, v4i32, VR128,
-                                 memopv2i64, i128mem, 0, SSE_PMULLD_ITINS>,
+                                 loadv2i64, i128mem, 0, SSE_PMULLD_ITINS>,
                                  VEX_4V;
   defm VPCMPEQQ : SS48I_binop_rm<0x29, "vpcmpeqq", X86pcmpeq, v2i64, VR128,
-                                 memopv2i64, i128mem, 0, SSE_INTALU_ITINS_P>,
+                                 loadv2i64, i128mem, 0, SSE_INTALU_ITINS_P>,
                                  VEX_4V;
 }
 let Predicates = [HasAVX2] in {
@@ -8622,12 +8622,12 @@ multiclass maskmov_lowering<string InstrStr, RegisterClass RC, ValueType VT,
     def: Pat<(X86mstore addr:$ptr, (MaskVT RC:$mask), (VT RC:$src)),
              (!cast<Instruction>(InstrStr#"mr") addr:$ptr, RC:$mask, RC:$src)>;
     // masked load
-    def: Pat<(VT (masked_load addr:$ptr, (MaskVT RC:$mask), undef)),
+    def: Pat<(VT (X86mload addr:$ptr, (MaskVT RC:$mask), undef)),
              (!cast<Instruction>(InstrStr#"rm") RC:$mask, addr:$ptr)>;
-    def: Pat<(VT (masked_load addr:$ptr, (MaskVT RC:$mask),
+    def: Pat<(VT (X86mload addr:$ptr, (MaskVT RC:$mask),
                               (VT (bitconvert (ZeroVT immAllZerosV))))),
              (!cast<Instruction>(InstrStr#"rm") RC:$mask, addr:$ptr)>;
-    def: Pat<(VT (masked_load addr:$ptr, (MaskVT RC:$mask), (VT RC:$src0))),
+    def: Pat<(VT (X86mload addr:$ptr, (MaskVT RC:$mask), (VT RC:$src0))),
              (!cast<Instruction>(BlendStr#"rr")
                  RC:$src0,
                  (!cast<Instruction>(InstrStr#"rm") RC:$mask, addr:$ptr),

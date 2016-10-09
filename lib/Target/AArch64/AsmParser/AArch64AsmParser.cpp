@@ -326,7 +326,7 @@ public:
   /// getStartLoc - Get the location of the first token of this operand.
   SMLoc getStartLoc() const override { return StartLoc; }
   /// getEndLoc - Get the location of the last token of this operand.
-  SMLoc getEndLoc() const override { return EndLoc; }
+  SMLoc getEndLoc() const { return EndLoc; }
 
   StringRef getToken() const {
     assert(Kind == k_Token && "Invalid access!");
@@ -4217,7 +4217,7 @@ bool AArch64AsmParser::parseDirectiveArch(SMLoc L) {
   }
 
   // Get the architecture and extension features.
-  std::vector<const char *> AArch64Features;
+  std::vector<StringRef> AArch64Features;
   AArch64::getArchFeatures(ID, AArch64Features);
   AArch64::getExtensionFeatures(AArch64::getDefaultExtensions("generic", ID),
                                 AArch64Features);
