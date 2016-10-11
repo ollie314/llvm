@@ -126,9 +126,9 @@ static cl::opt<bool>
 
 extern "C" void LLVMInitializeAArch64Target() {
   // Register the target.
-  RegisterTargetMachine<AArch64leTargetMachine> X(TheAArch64leTarget);
-  RegisterTargetMachine<AArch64beTargetMachine> Y(TheAArch64beTarget);
-  RegisterTargetMachine<AArch64leTargetMachine> Z(TheARM64Target);
+  RegisterTargetMachine<AArch64leTargetMachine> X(getTheAArch64leTarget());
+  RegisterTargetMachine<AArch64beTargetMachine> Y(getTheAArch64beTarget());
+  RegisterTargetMachine<AArch64leTargetMachine> Z(getTheARM64Target());
   auto PR = PassRegistry::getPassRegistry();
   initializeGlobalISel(*PR);
   initializeAArch64A53Fix835769Pass(*PR);
@@ -254,7 +254,7 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
     // FIXME: At this point, we can't rely on Subtarget having RBI.
     // It's awkward to mix passing RBI and the Subtarget; should we pass
     // TII/TRI as well?
-    GISel->InstSelector.reset(new AArch64InstructionSelector(*I, *RBI));
+    GISel->InstSelector.reset(new AArch64InstructionSelector(*this, *I, *RBI));
 
     GISel->RegBankInfo.reset(RBI);
 #endif
