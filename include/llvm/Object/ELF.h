@@ -319,13 +319,23 @@ ELFFile<ELFT>::ELFFile(StringRef Object, std::error_code &EC)
 
   Header = reinterpret_cast<const Elf_Ehdr *>(base());
 
-  if (Header->e_shoff == 0)
+  if (Header->e_shoff == 0) {
+    if (Header->e_shnum != 0)
+      report_fatal_error(
+          "e_shnum should be zero if a file has no section header table");
     return;
+  }
 
   const uint64_t SectionTableOffset = Header->e_shoff;
 
   if (SectionTableOffset + sizeof(Elf_Shdr) > FileSize) {
     // Section header table goes past end of file!
+    EC = object_error::parse_failed;
+    return;
+  }
+
+  if (SectionTableOffset & (AlignOf<Elf_Shdr>::Alignment - 1)) {
+    // Invalid address alignment of section headers
     EC = object_error::parse_failed;
     return;
   }
@@ -399,9 +409,11 @@ ELFFile<ELFT>::getSection(uint32_t Index) const {
   if (Index >= getNumSections())
     return object_error::invalid_section_index;
 
-  return reinterpret_cast<const Elf_Shdr *>(
-      reinterpret_cast<const char *>(SectionHeaderTable) +
-      (Index * Header->e_shentsize));
+  const uint8_t *Addr = reinterpret_cast<const uint8_t *>(SectionHeaderTable) +
+                        (Index * Header->e_shentsize);
+  if (Addr >= base() + getBufSize())
+    return object_error::invalid_section_index;
+  return reinterpret_cast<const Elf_Shdr *>(Addr);
 }
 
 template <class ELFT>

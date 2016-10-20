@@ -60,24 +60,17 @@
 /// \macro LLVM_MSC_PREREQ
 /// \brief Is the compiler MSVC of at least the specified version?
 /// The common \param version values to check for are:
-///  * 1800: Microsoft Visual Studio 2013 / 12.0
 ///  * 1900: Microsoft Visual Studio 2015 / 14.0
 #ifdef _MSC_VER
 #define LLVM_MSC_PREREQ(version) (_MSC_VER >= (version))
 
-// We require at least MSVC 2013.
-#if !LLVM_MSC_PREREQ(1800)
-#error LLVM requires at least MSVC 2013.
+// We require at least MSVC 2015.
+#if !LLVM_MSC_PREREQ(1900)
+#error LLVM requires at least MSVC 2015.
 #endif
 
 #else
 #define LLVM_MSC_PREREQ(version) 0
-#endif
-
-#if !defined(_MSC_VER) || defined(__clang__) || LLVM_MSC_PREREQ(1900)
-#define LLVM_NOEXCEPT noexcept
-#else
-#define LLVM_NOEXCEPT throw()
 #endif
 
 /// \brief Does the compiler support ref-qualifiers for *this?
@@ -118,6 +111,12 @@
 #define LLVM_LIBRARY_VISIBILITY
 #endif
 
+#if defined(__GNUC__)
+#define LLVM_PREFETCH(addr, rw, locality) __builtin_prefetch(addr, rw, locality)
+#else
+#define LLVM_PREFETCH(addr, rw, locality)
+#endif
+
 #if __has_attribute(sentinel) || LLVM_GNUC_PREREQ(3, 0, 0)
 #define LLVM_END_WITH_NULL __attribute__((sentinel))
 #else
@@ -128,15 +127,6 @@
 #define LLVM_ATTRIBUTE_USED __attribute__((__used__))
 #else
 #define LLVM_ATTRIBUTE_USED
-#endif
-
-/// LLVM_ATTRIBUTE_UNUSED_RESULT - Deprecated. Use LLVM_NODISCARD instead.
-#if __has_attribute(warn_unused_result) || LLVM_GNUC_PREREQ(3, 4, 0)
-#define LLVM_ATTRIBUTE_UNUSED_RESULT __attribute__((__warn_unused_result__))
-#elif defined(_MSC_VER)
-#define LLVM_ATTRIBUTE_UNUSED_RESULT _Check_return_
-#else
-#define LLVM_ATTRIBUTE_UNUSED_RESULT
 #endif
 
 /// LLVM_NODISCARD - Warn if a type or return value is discarded.
@@ -391,15 +381,6 @@
 # error "could not determine LLVM_PTR_SIZE as a constant int for MSVC"
 #else
 # define LLVM_PTR_SIZE sizeof(void *)
-#endif
-
-/// \macro LLVM_FUNCTION_NAME
-/// \brief Expands to __func__ on compilers which support it.  Otherwise,
-/// expands to a compiler-dependent replacement.
-#if defined(_MSC_VER)
-# define LLVM_FUNCTION_NAME __FUNCTION__
-#else
-# define LLVM_FUNCTION_NAME __func__
 #endif
 
 /// \macro LLVM_MEMORY_SANITIZER_BUILD
