@@ -30,24 +30,16 @@ TracePC TPC;
 void TracePC::HandleTrace(uint32_t *Guard, uintptr_t PC) {
   uint32_t Idx = *Guard;
   if (!Idx) return;
-  uint8_t *CounterPtr = &Counters[Idx % kNumCounters];
-  uint8_t Counter = *CounterPtr;
-  if (Counter == 0) {
-    if (!PCs[Idx % kNumPCs]) {
-      AddNewPCID(Idx);
-      TotalPCCoverage++;
-      PCs[Idx % kNumPCs] = PC;
-    }
-  }
-  if (UseCounters) {
-    if (Counter < 128)
-      *CounterPtr = Counter + 1;
-    else
-      *Guard = 0;
-  } else {
-    *CounterPtr = 1;
-    *Guard = 0;
-  }
+  PCs[Idx % kNumPCs] = PC;
+  Counters[Idx % kNumCounters]++;
+}
+
+size_t TracePC::GetTotalPCCoverage() {
+  size_t Res = 0;
+  for (size_t i = 1; i < GetNumPCs(); i++)
+    if (PCs[i])
+      Res++;
+  return Res;
 }
 
 void TracePC::HandleInit(uint32_t *Start, uint32_t *Stop) {
@@ -65,14 +57,6 @@ void TracePC::PrintModuleInfo() {
   for (size_t i = 0; i < NumModules; i++)
     Printf("[%p, %p), ", Modules[i].Start, Modules[i].Stop);
   Printf("\n");
-}
-
-void TracePC::ResetGuards() {
-  uint32_t N = 0;
-  for (size_t M = 0; M < NumModules; M++)
-    for (uint32_t *X = Modules[M].Start, *End = Modules[M].Stop; X < End; X++)
-      *X = ++N;
-  assert(N == NumGuards);
 }
 
 size_t TracePC::FinalizeTrace(InputCorpus *C, size_t InputSize, bool Shrink) {
@@ -129,6 +113,16 @@ static bool IsInterestingCoverageFile(std::string &File) {
   return true;
 }
 
+void TracePC::PrintNewPCs() {
+  if (DoPrintNewPCs) {
+    if (!PrintedPCs)
+      PrintedPCs = new std::set<uintptr_t>;
+    for (size_t i = 1; i < GetNumPCs(); i++)
+      if (PCs[i] && PrintedPCs->insert(PCs[i]).second)
+        PrintPC("\tNEW_PC: %p %F %L\n", "\tNEW_PC: %p\n", PCs[i]);
+  }
+}
+
 void TracePC::PrintCoverage() {
   if (!EF->__sanitizer_symbolize_pc) {
     Printf("INFO: __sanitizer_symbolize_pc is not available,"
@@ -139,7 +133,7 @@ void TracePC::PrintCoverage() {
   std::map<std::string, uintptr_t> ModuleOffsets;
   std::set<std::string> CoveredFiles, CoveredFunctions, CoveredLines;
   Printf("COVERAGE:\n");
-  for (size_t i = 0; i < Min(NumGuards + 1, kNumPCs); i++) {
+  for (size_t i = 1; i < GetNumPCs(); i++) {
     if (!PCs[i]) continue;
     std::string FileStr = DescribePC("%s", PCs[i]);
     if (!IsInterestingCoverageFile(FileStr)) continue;

@@ -54,7 +54,12 @@ void WebAssemblyInstPrinter::printInst(const MCInst *MI, raw_ostream &OS,
   const MCInstrDesc &Desc = MII.get(MI->getOpcode());
   if (Desc.isVariadic())
     for (auto i = Desc.getNumOperands(), e = MI->getNumOperands(); i < e; ++i) {
-      if (i != 0)
+      // FIXME: For CALL_INDIRECT_VOID, don't print a leading comma, because
+      // we have an extra flags operand which is not currently printed, for
+      // compatiblity reasons.
+      if (i != 0 && 
+          (MI->getOpcode() != WebAssembly::CALL_INDIRECT_VOID ||
+           i != Desc.getNumOperands()))
         OS << ", ";
       printOperand(MI, i, OS);
     }
@@ -154,6 +159,7 @@ void WebAssemblyInstPrinter::printOperand(const MCInst *MI, unsigned OpNo,
             (Desc.TSFlags & WebAssemblyII::VariableOpIsImmediate)) &&
            "WebAssemblyII::VariableOpIsImmediate should be set for "
            "variable_ops immediate ops");
+    (void)Desc;
     // TODO: (MII.get(MI->getOpcode()).TSFlags &
     //        WebAssemblyII::VariableOpImmediateIsLabel)
     // can tell us whether this is an immediate referencing a label in the
