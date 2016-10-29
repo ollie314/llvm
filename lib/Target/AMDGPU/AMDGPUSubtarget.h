@@ -105,6 +105,8 @@ protected:
   bool Has16BitInsts;
   bool HasMovrel;
   bool HasVGPRIndexMode;
+  bool HasScalarStores;
+  bool HasInv2PiInlineImm;
   bool FlatAddressSpace;
   bool R600ALUInst;
   bool CaymanISA;
@@ -527,6 +529,14 @@ public:
     return getGeneration() >= VOLCANIC_ISLANDS;
   }
 
+  bool hasScalarStores() const {
+    return HasScalarStores;
+  }
+
+  bool hasInv2PiInlineImm() const {
+    return HasInv2PiInlineImm;
+  }
+
   bool enableSIScheduler() const {
     return EnableSIScheduler;
   }
@@ -556,6 +566,10 @@ public:
     return SGPRInitBug;
   }
 
+  bool has12DWordStoreHazard() const {
+    return getGeneration() != AMDGPUSubtarget::SOUTHERN_ISLANDS;
+  }
+
   unsigned getKernArgSegmentSize(unsigned ExplictArgBytes) const;
 
   /// Return the maximum number of waves per SIMD for kernels using \p SGPRs SGPRs
@@ -569,6 +583,8 @@ public:
   bool needWaitcntBeforeBarrier() const {
     return true;
   }
+
+  unsigned getMaxNumSGPRs() const;
 };
 
 } // End namespace llvm
