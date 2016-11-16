@@ -265,7 +265,8 @@ bool SIInstrInfo::getMemOpBaseRegImmOfs(MachineInstr &LdSt, unsigned &BaseReg,
   }
 
   if (isMUBUF(LdSt) || isMTBUF(LdSt)) {
-    if (AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::soffset) != -1)
+    const MachineOperand *SOffset = getNamedOperand(LdSt, AMDGPU::OpName::soffset);
+    if (SOffset && SOffset->isReg())
       return false;
 
     const MachineOperand *AddrReg =
@@ -277,6 +278,10 @@ bool SIInstrInfo::getMemOpBaseRegImmOfs(MachineInstr &LdSt, unsigned &BaseReg,
         getNamedOperand(LdSt, AMDGPU::OpName::offset);
     BaseReg = AddrReg->getReg();
     Offset = OffsetImm->getImm();
+
+    if (SOffset) // soffset can be an inline immediate.
+      Offset += SOffset->getImm();
+
     return true;
   }
 
@@ -539,7 +544,7 @@ void SIInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
       MRI.constrainRegClass(SrcReg, &AMDGPU::SReg_32_XM0RegClass);
     }
 
-    BuildMI(MBB, MI, DL, OpDesc)
+    MachineInstrBuilder Spill = BuildMI(MBB, MI, DL, OpDesc)
       .addReg(SrcReg, getKillRegState(isKill)) // data
       .addFrameIndex(FrameIndex)               // addr
       .addMemOperand(MMO)
@@ -548,6 +553,11 @@ void SIInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
     // Add the scratch resource registers as implicit uses because we may end up
     // needing them, and need to ensure that the reserved registers are
     // correctly handled.
+
+    if (ST.hasScalarStores()) {
+      // m0 is used for offset to scalar stores if used to spill.
+      Spill.addReg(AMDGPU::M0, RegState::ImplicitDefine);
+    }
 
     return;
   }
@@ -638,11 +648,16 @@ void SIInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
       MRI.constrainRegClass(DestReg, &AMDGPU::SReg_32_XM0RegClass);
     }
 
-    BuildMI(MBB, MI, DL, OpDesc, DestReg)
+    MachineInstrBuilder Spill = BuildMI(MBB, MI, DL, OpDesc, DestReg)
       .addFrameIndex(FrameIndex) // addr
       .addMemOperand(MMO)
       .addReg(MFI->getScratchRSrcReg(), RegState::Implicit)
       .addReg(MFI->getScratchWaveOffsetReg(), RegState::Implicit);
+
+    if (ST.hasScalarStores()) {
+      // m0 is used for offset to scalar stores if used to spill.
+      Spill.addReg(AMDGPU::M0, RegState::ImplicitDefine);
+    }
 
     return;
   }
@@ -3481,6 +3496,9 @@ unsigned SIInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   // 4, even though they are really 8 bytes if they have a literal operand.
   if (DescSize != 0 && DescSize != 4)
     return DescSize;
+
+  if (Opc == AMDGPU::WAVE_BARRIER)
+    return 0;
 
   // 4-byte instructions may have a 32-bit literal encoded after them. Check
   // operands that coud ever be literals.

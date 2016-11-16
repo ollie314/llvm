@@ -289,6 +289,7 @@ SITargetLowering::SITargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::FSIN, MVT::f16, Promote);
 
     // F16 - VOP2 Actions.
+    setOperationAction(ISD::SELECT_CC, MVT::f16, Expand);
     setOperationAction(ISD::FMAXNUM, MVT::f16, Legal);
     setOperationAction(ISD::FMINNUM, MVT::f16, Legal);
     setOperationAction(ISD::FDIV, MVT::f16, Promote);
@@ -4047,13 +4048,16 @@ void SITargetLowering::AdjustInstrPostInstrSelection(MachineInstr &MI,
 
   if (TII->isMIMG(MI)) {
     unsigned VReg = MI.getOperand(0).getReg();
+    const TargetRegisterClass *RC = MRI.getRegClass(VReg);
+    // TODO: Need mapping tables to handle other cases (register classes).
+    if (RC != &AMDGPU::VReg_128RegClass)
+      return;
+
     unsigned DmaskIdx = MI.getNumOperands() == 12 ? 3 : 4;
     unsigned Writemask = MI.getOperand(DmaskIdx).getImm();
     unsigned BitsSet = 0;
     for (unsigned i = 0; i < 4; ++i)
       BitsSet += Writemask & (1 << i) ? 1 : 0;
-
-    const TargetRegisterClass *RC;
     switch (BitsSet) {
     default: return;
     case 1:  RC = &AMDGPU::VGPR_32RegClass; break;
