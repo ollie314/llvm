@@ -17,10 +17,11 @@ add_llvm_unittest(SupportTests
   DwarfTest.cpp
   EndianStreamTest.cpp
   EndianTest.cpp
-  ErrorTest.cpp
   ErrorOrTest.cpp
+  ErrorTest.cpp
   FileOutputBufferTest.cpp
   FormatVariadicTest.cpp
+  GlobPatternTest.cpp
   Host.cpp
   LEB128Test.cpp
   LineIteratorTest.cpp
@@ -48,6 +49,7 @@ add_llvm_unittest(SupportTests
   TimerTest.cpp
   TypeNameTest.cpp
   TrailingObjectsTest.cpp
+  TrigramIndexTest.cpp
   UnicodeTest.cpp
   YAMLIOTest.cpp
   YAMLParserTest.cpp

@@ -56,6 +56,7 @@ add_llvm_library(LLVMSupport
   FoldingSet.cpp
   FormattedStream.cpp
   FormatVariadic.cpp
+  GlobPattern.cpp
   GraphWriter.cpp
   Hashing.cpp
   IntEqClasses.cpp
@@ -94,6 +95,7 @@ add_llvm_library(LLVMSupport
   ThreadPool.cpp
   Timer.cpp
   ToolOutputFile.cpp
+  TrigramIndex.cpp
   Triple.cpp
   Twine.cpp
   Unicode.cpp
